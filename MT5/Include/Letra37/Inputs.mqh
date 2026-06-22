@@ -107,6 +107,19 @@ input int    InpSessionEndHr    = 20;          // Session end hour (server time)
 input bool   InpTradeMonday     = true;
 input bool   InpTradeFriday     = true;
 
+//==================== FU ORDER BLOCKS (advisory) ==================
+input group "FU Order Blocks (advisory)"
+input int    InpFuLookback      = 3;     // FU Detection Lookback Bars
+input double InpFuMinBodyRatio  = 0.6;   // Min Body/Range Ratio (FU candle)
+input double InpFuMinWickRatio  = 0.25;  // Min Wick Ratio
+input int    InpFuMaxBarsActive = 75;    // FU Zone Max Active Bars
+input bool   InpFuRequireInZone = true;  // Require Price in Wave Zone
+
+//==================== FUTURE RETURN ZONES (advisory) ==============
+input group "Future Return Zones (advisory)"
+input int    InpFrzMinScore     = 26;    // Min FRZ Score to Display (0-100)
+input int    InpFrzMaxBarsActive= 100;   // FRZ Max Active Bars
+
 //==================== DISPLAY =====================================
 input group "Display"
 input bool   InpShowDashboard   = true;        // Show on-chart dashboard panel
