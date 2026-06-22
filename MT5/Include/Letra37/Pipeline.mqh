@@ -57,6 +57,7 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    TimeIntel_Compute(); // Time Intelligence Engine (context)
    CurveTree_Compute(); // F72 literal recursive curve tree (per-node ownership/merge)
    CurveOwnership_Compute(); // F72 recursive curve ownership (budget/building-vs-entry)
+   MtfOwnership_Compute();   // cross-TF curve-ownership map + transfer-state ladder
    CurveLife_Compute(); // F72 curve-life (open-trade management)
   }
 

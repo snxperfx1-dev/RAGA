@@ -47,6 +47,13 @@ double se60_inv=PINE_NA, se60_sh=PINE_NA, se60_sl=PINE_NA, se60_ft=PINE_NA, se60
 double se240_inv=PINE_NA, se240_sh=PINE_NA, se240_sl=PINE_NA, se240_ft=PINE_NA, se240_fb=PINE_NA, se240_tgt=PINE_NA, se240_wp=0.0, se240_comp=0.0;
 int    se60_phCode=0, se240_phCode=0;
 
+//--- full per-rung curve state (for the multi-timeframe ownership engine)
+double se1_wp=0.0,  se1_comp=0.0,  se1_rec=0.0,  se1_dom=0.0;
+double se3_wp=0.0,  se3_comp=0.0,  se3_rec=0.0,  se3_dom=0.0;
+double se15_wp=0.0, se15_comp=0.0, se15_rec=0.0, se15_dom=0.0;
+double se60_rec=0.0, se60_dom=0.0;
+double se240_rec=0.0, se240_dom=0.0;
+
 //==================================================================
 //  phase code -> canonical lifecycle string (V60 14-phase)
 //==================================================================
@@ -404,6 +411,13 @@ void Struct_DeriveLive()
    se60_tgt=g_se60.oTgt; se60_wp=g_se60.oWp; se60_comp=g_se60.oComp; se60_phCode=g_se60.oPh;
    se240_inv=g_se240.oInv; se240_sh=g_se240.oSH; se240_sl=g_se240.oSL; se240_ft=g_se240.oFt; se240_fb=g_se240.oFb;
    se240_tgt=g_se240.oTgt; se240_wp=g_se240.oWp; se240_comp=g_se240.oComp; se240_phCode=g_se240.oPh;
+
+   //--- full per-rung curve state
+   se1_wp=g_se1.oWp;   se1_comp=g_se1.oComp;   se1_rec=g_se1.oRec;   se1_dom=g_se1.oDom;
+   se3_wp=g_se3.oWp;   se3_comp=g_se3.oComp;   se3_rec=g_se3.oRec;   se3_dom=g_se3.oDom;
+   se15_wp=g_se15.oWp; se15_comp=g_se15.oComp; se15_rec=g_se15.oRec; se15_dom=g_se15.oDom;
+   se60_rec=g_se60.oRec; se60_dom=g_se60.oDom;
+   se240_rec=g_se240.oRec; se240_dom=g_se240.oDom;
 
    l0_phaseCanon = PhaseStr(g_se5.oPh);
 

@@ -124,6 +124,11 @@ void CurveLife_Compute()
    else if(ct_merged && cl_state=="DEAD")
      { cl_life=MathMax(cl_life,50.0); cl_state="WEAKENING"; cl_aliveTx="HOLD - child MERGED back to parent"; }
 
+   //--- cross-TF ownership transfer: if the MTF owner has fully flipped against
+   //    the curve owner, higher-order control has moved -> bias toward DEAD/flip
+   if(mo_transferState=="COMPLETE" && mo_dir!=0 && mo_dir!=cl_ownDir)
+     { cl_life=MathMin(cl_life,35.0); if(cl_life<=32.0){ cl_state="DEAD"; cl_aliveTx="DEAD - MTF ownership flipped ("+mo_ownerLabel+")"; } }
+
    //--- migrated ownership band (0.5 / 0.618 of the owner leg)
    cl_mig50  = (IsNa(ownOrig)||IsNa(ownExt)) ? PINE_NA : ownExt + 0.5  *(ownOrig-ownExt);
    cl_mig618 = (IsNa(ownOrig)||IsNa(ownExt)) ? PINE_NA : ownExt + 0.618*(ownOrig-ownExt);

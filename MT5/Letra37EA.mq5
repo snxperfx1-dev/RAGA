@@ -42,6 +42,7 @@
 #include "Include/Letra37/ScoringSignals.mqh"
 #include "Include/Letra37/CurveTree.mqh"
 #include "Include/Letra37/CurveOwnership.mqh"
+#include "Include/Letra37/MtfOwnership.mqh"
 #include "Include/Letra37/CurveLife.mqh"
 #include "Include/Letra37/TradeManager.mqh"
 #include "Include/Letra37/Dashboard.mqh"
@@ -74,6 +75,7 @@ int OnInit()
    TimeIntel_Init();
    CurveTree_Init();
    CurveOwnership_Init();
+   MtfOwnership_Init();
    CurveLife_Init();
    Trade_Init();
 
