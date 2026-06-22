@@ -1,18 +1,19 @@
 //+------------------------------------------------------------------+
 //|                                          Letra37EA_AllInOne.mq5  |
 //|   Autonomous Expert Advisor - faithful single-file MQL5 port of  |
-//|   the "Letra 37" Pine Script v6 engine, upgraded with selected   |
-//|   V60 modules + the F72 recursive curve framework:               |
-//|   14-phase structure engine, adaptive TF ladder, Time            |
-//|   Intelligence Engine, recursive curve TREE (per-node ownership/ |
-//|   FU-merge), curve ownership (building-vs-entry, budget) and the |
-//|   curve-life "is the trade alive?" manager.                      |
+//|   the "Letra 37" Pine Script v6 engine + the full F72 recursive  |
+//|   curve framework: 14-phase structure engine, adaptive TF        |
+//|   ladder, Time Intelligence Engine, recursive curve TREE         |
+//|   (per-node ownership/FU-merge), multi-timeframe curve OWNERSHIP  |
+//|   map (transfer ladder / Wyckoff four-shift / entry architecture),|
+//|   curve ownership (building-vs-entry, budget) and the curve-life |
+//|   "is the trade alive?" manager.                                 |
 //|   Keeps the Letra decision layer; excludes the Senseei layer.    |
 //|                                                                  |
 //|   COMBINED build: every module inlined in dependency order.      |
 //+------------------------------------------------------------------+
 #property copyright "Letra 37 Port"
-#property version   "1.30"
+#property version   "1.40"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -954,6 +955,13 @@ double se60_inv=PINE_NA, se60_sh=PINE_NA, se60_sl=PINE_NA, se60_ft=PINE_NA, se60
 double se240_inv=PINE_NA, se240_sh=PINE_NA, se240_sl=PINE_NA, se240_ft=PINE_NA, se240_fb=PINE_NA, se240_tgt=PINE_NA, se240_wp=0.0, se240_comp=0.0;
 int    se60_phCode=0, se240_phCode=0;
 
+//--- full per-rung curve state (for the multi-timeframe ownership engine)
+double se1_wp=0.0,  se1_comp=0.0,  se1_rec=0.0,  se1_dom=0.0;
+double se3_wp=0.0,  se3_comp=0.0,  se3_rec=0.0,  se3_dom=0.0;
+double se15_wp=0.0, se15_comp=0.0, se15_rec=0.0, se15_dom=0.0;
+double se60_rec=0.0, se60_dom=0.0;
+double se240_rec=0.0, se240_dom=0.0;
+
 //==================================================================
 //  phase code -> canonical lifecycle string (V60 14-phase)
 //==================================================================
@@ -1311,6 +1319,13 @@ void Struct_DeriveLive()
    se60_tgt=g_se60.oTgt; se60_wp=g_se60.oWp; se60_comp=g_se60.oComp; se60_phCode=g_se60.oPh;
    se240_inv=g_se240.oInv; se240_sh=g_se240.oSH; se240_sl=g_se240.oSL; se240_ft=g_se240.oFt; se240_fb=g_se240.oFb;
    se240_tgt=g_se240.oTgt; se240_wp=g_se240.oWp; se240_comp=g_se240.oComp; se240_phCode=g_se240.oPh;
+
+   //--- full per-rung curve state
+   se1_wp=g_se1.oWp;   se1_comp=g_se1.oComp;   se1_rec=g_se1.oRec;   se1_dom=g_se1.oDom;
+   se3_wp=g_se3.oWp;   se3_comp=g_se3.oComp;   se3_rec=g_se3.oRec;   se3_dom=g_se3.oDom;
+   se15_wp=g_se15.oWp; se15_comp=g_se15.oComp; se15_rec=g_se15.oRec; se15_dom=g_se15.oDom;
+   se60_rec=g_se60.oRec; se60_dom=g_se60.oDom;
+   se240_rec=g_se240.oRec; se240_dom=g_se240.oDom;
 
    l0_phaseCanon = PhaseStr(g_se5.oPh);
 
@@ -3293,6 +3308,112 @@ void CurveOwnership_Compute()
 //+------------------------------------------------------------------+
 
 // =================================================================
+// ==== INLINED: Include/Letra37/MtfOwnership.mqh
+// =================================================================
+//+------------------------------------------------------------------+
+//|  MtfOwnership.mqh - Multi-Timeframe Curve Ownership Engine       |
+//|                                                                  |
+//|  Principle 12/14, Priority Level 1: every timeframe runs its own |
+//|  recursive curve simultaneously (M1..H4). This engine reads each |
+//|  rung's own curve state (direction, wave progress, compression,  |
+//|  recursion count, dominance transfer) and rolls them into the    |
+//|  single question that matters most:                              |
+//|                                                                  |
+//|    WHICH CURVE CURRENTLY OWNS PRICE  (H4 70% / H1 20% / M5 10%)  |
+//|                                                                  |
+//|  plus the TRANSFER-STATE ladder (Stable -> Building -> Contested |
+//|  -> Transferring -> Complete), the Wyckoff FOUR-SHIFT count at   |
+//|  terminal/transition zones (spring/test/LPS1/LPS2 = always 4),   |
+//|  and the ENTRY ARCHITECTURE (wide large-recursion vs compressed  |
+//|  failure-swing) that decides how the entry cycle will build.     |
+//|                                                                  |
+//|  Context + management read only; never gates the Letra trigger.  |
+//+------------------------------------------------------------------+
+
+//================= OWNERSHIP MAP OUTPUTS ==========================
+double mo_pct[6];                 // ownership % per rung (M1,M3,M5,M15,H1,H4)
+string mo_lbl[6];                 // rung labels
+int    mo_dirArr[6];              // rung directions
+int    mo_ownerIdx=2, mo_secondIdx=4;
+double mo_ownerPct=0.0, mo_secondPct=0.0;
+string mo_ownerLabel="M5", mo_secondLabel="H1";
+int    mo_dir=0;                  // owning rung direction
+string mo_transferState="STABLE"; // STABLE|BUILDING|CONTESTED|TRANSFERRING|COMPLETE
+int    mo_wyckoffShifts=0;        // shifts toward the canonical 4
+bool   mo_fourShiftDone=false;
+string mo_entryArch="MIXED";      // WIDE | COMPRESSION | MIXED
+int    mo_expectedEntries=1;
+
+void MtfOwnership_Init() {}
+
+//--- rung label from the adaptive ladder
+string MO_TFLabel(const ENUM_TIMEFRAMES tf)
+  {
+   switch(tf)
+     {
+      case PERIOD_M1:  return "M1";   case PERIOD_M3:  return "M3";  case PERIOD_M5:  return "M5";
+      case PERIOD_M15: return "M15";  case PERIOD_M30: return "M30"; case PERIOD_H1:  return "H1";
+      case PERIOD_H4:  return "H4";   case PERIOD_D1:  return "D1";  case PERIOD_W1:  return "W1";
+      case PERIOD_MN1: return "MN";   default: return EnumToString(tf);
+     }
+  }
+
+void MtfOwnership_Compute()
+  {
+   //--- per-rung curve state (each timeframe's own recursive curve)
+   mo_dirArr[0]=m1_dir; mo_dirArr[1]=l3_dir; mo_dirArr[2]=l0_dir;
+   mo_dirArr[3]=l1_dir; mo_dirArr[4]=l2_dir; mo_dirArr[5]=l4_dir;
+   double wp[6];   wp[0]=se1_wp;  wp[1]=se3_wp;  wp[2]=se5_wp;  wp[3]=se15_wp;  wp[4]=se60_wp;  wp[5]=se240_wp;
+   double dom[6];  dom[0]=se1_dom;dom[1]=se3_dom;dom[2]=se5_dom;dom[3]=se15_dom;dom[4]=se60_dom;dom[5]=se240_dom;
+   //--- contextual timeframe authority (higher TF carries more weight)
+   double tfW[6];  tfW[0]=0.04; tfW[1]=0.06; tfW[2]=0.14; tfW[3]=0.20; tfW[4]=0.26; tfW[5]=0.30;
+
+   mo_lbl[0]=MO_TFLabel(g_ladderTF[0]); mo_lbl[1]=MO_TFLabel(g_ladderTF[1]); mo_lbl[2]=MO_TFLabel(g_ladderTF[2]);
+   mo_lbl[3]=MO_TFLabel(g_ladderTF[3]); mo_lbl[4]=MO_TFLabel(g_ladderTF[4]); mo_lbl[5]=MO_TFLabel(g_ladderTF[5]);
+
+   //--- ownership weight: a curve owns price when it is mid-progress (actively
+   //    delivering) and carries dominance/recursion energy, scaled by TF authority.
+   double raw[6]; double tot=0.0;
+   for(int i=0;i<6;i++)
+     {
+      double midW = MathMax(0.0, 1.0 - MathAbs(wp[i]-50.0)/55.0);   // peaks at mid-progress
+      raw[i] = tfW[i] * (0.5 + 0.5*midW) * (1.0 + dom[i]/200.0);
+      tot += raw[i];
+     }
+   mo_ownerIdx=0; mo_secondIdx=1; mo_ownerPct=0.0; mo_secondPct=0.0;
+   for(int i=0;i<6;i++)
+     {
+      mo_pct[i] = tot>0.0 ? raw[i]/tot*100.0 : 0.0;
+      if(mo_pct[i]>mo_ownerPct){ mo_secondPct=mo_ownerPct; mo_secondIdx=mo_ownerIdx; mo_ownerPct=mo_pct[i]; mo_ownerIdx=i; }
+      else if(mo_pct[i]>mo_secondPct){ mo_secondPct=mo_pct[i]; mo_secondIdx=i; }
+     }
+   mo_ownerLabel=mo_lbl[mo_ownerIdx];
+   mo_secondLabel=mo_lbl[mo_secondIdx];
+   mo_dir = mo_dirArr[mo_ownerIdx];
+
+   //--- transfer-state ladder (dominance within the owning curve + contest gap)
+   double domOwner = dom[mo_ownerIdx];
+   double gap = mo_ownerPct - mo_secondPct;
+   mo_transferState =
+        domOwner>=70.0 ? "COMPLETE" :
+        domOwner>=50.0 ? "TRANSFERRING" :
+        gap<12.0       ? "CONTESTED" :
+        domOwner>=40.0 ? "BUILDING" : "STABLE";
+
+   //--- Wyckoff four-shift (only meaningful at terminal/transition zones)
+   bool terminal = (co_campaign=="TERMINAL");
+   mo_wyckoffShifts = terminal ? (int)MathMin(4.0, se5_rec) : 0;
+   mo_fourShiftDone = terminal && (se5_rec>=4.0 || co_transferComplete);
+
+   //--- entry architecture from terminal compression (Model A wide vs Model B tight)
+   double comp = se5_comp;
+   mo_entryArch = comp>=60.0 ? "COMPRESSION (failure-swing + tiny recursions)" :
+                  comp<25.0  ? "WIDE (large recursions)" : "MIXED";
+   mo_expectedEntries = comp>=75.0 ? 4 : comp>=50.0 ? 3 : comp>=25.0 ? 2 : 1;
+  }
+//+------------------------------------------------------------------+
+
+// =================================================================
 // ==== INLINED: Include/Letra37/CurveLife.mqh
 // =================================================================
 //+------------------------------------------------------------------+
@@ -3419,6 +3540,11 @@ void CurveLife_Compute()
      { cl_life=MathMin(cl_life,30.0); cl_state="DEAD"; cl_aliveTx="DEAD - OWNERSHIP TRANSFERRED ("+ct_ownStateTx+")"; }
    else if(ct_merged && cl_state=="DEAD")
      { cl_life=MathMax(cl_life,50.0); cl_state="WEAKENING"; cl_aliveTx="HOLD - child MERGED back to parent"; }
+
+   //--- cross-TF ownership transfer: if the MTF owner has fully flipped against
+   //    the curve owner, higher-order control has moved -> bias toward DEAD/flip
+   if(mo_transferState=="COMPLETE" && mo_dir!=0 && mo_dir!=cl_ownDir)
+     { cl_life=MathMin(cl_life,35.0); if(cl_life<=32.0){ cl_state="DEAD"; cl_aliveTx="DEAD - MTF ownership flipped ("+mo_ownerLabel+")"; } }
 
    //--- migrated ownership band (0.5 / 0.618 of the owner leg)
    cl_mig50  = (IsNa(ownOrig)||IsNa(ownExt)) ? PINE_NA : ownExt + 0.5  *(ownOrig-ownExt);
@@ -3877,6 +4003,8 @@ void Dash_Update()
    s += "  particip: "+co_partZone + nl;
    s += "CurveTree : owner "+DirWord(ct_ownDir)+" d"+IntegerToString(ct_ownDepth)+" e"+DoubleToString(ct_ownEnergy,0)+"  "+ct_ownState + nl;
    s += "  nodes   : "+IntegerToString(ct_treeAlive)+" alive  depth "+IntegerToString(ct_treeDepth)+"/"+IntegerToString(ct_budgetDepth)+"   "+ct_ownStateTx + nl;
+   s += "MTF own   : "+mo_ownerLabel+" "+DoubleToString(mo_ownerPct,0)+"% / "+mo_secondLabel+" "+DoubleToString(mo_secondPct,0)+"%  "+DirWord(mo_dir)+"  ["+mo_transferState+"]" + nl;
+   s += "  arch    : "+mo_entryArch+"  ~"+IntegerToString(mo_expectedEntries)+" entries   Wyckoff "+IntegerToString(mo_wyckoffShifts)+"/4" + nl;
    s += "TimeIntel : dir "+DirWord(timeDir)+"  align "+DoubleToString(timeAlign,0)+"%   H1 "+h1Timing+" ("+tH1State+")" + nl;
    s += "TradeState: " + (tradeDir==1?"LONG":tradeDir==-1?"SHORT":"FLAT") + "   positions "+IntegerToString(Trade_CountPositions()) + nl;
    s += "Vol regime: " + phys_volRegime + "  ATR "+DoubleToString(IsNa(atr)?0.0:atr,_Digits);
@@ -3946,6 +4074,7 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    TimeIntel_Compute(); // Time Intelligence Engine (context)
    CurveTree_Compute(); // F72 literal recursive curve tree (per-node ownership/merge)
    CurveOwnership_Compute(); // F72 recursive curve ownership (budget/building-vs-entry)
+   MtfOwnership_Compute();   // cross-TF curve-ownership map + transfer-state ladder
    CurveLife_Compute(); // F72 curve-life (open-trade management)
   }
 
@@ -4015,6 +4144,7 @@ int OnInit()
    TimeIntel_Init();
    CurveTree_Init();
    CurveOwnership_Init();
+   MtfOwnership_Init();
    CurveLife_Init();
    Trade_Init();
 
