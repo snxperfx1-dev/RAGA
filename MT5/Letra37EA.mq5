@@ -40,6 +40,7 @@
 #include "Include/Letra37/Erf.mqh"
 #include "Include/Letra37/TimeIntel.mqh"
 #include "Include/Letra37/ScoringSignals.mqh"
+#include "Include/Letra37/CurveTree.mqh"
 #include "Include/Letra37/CurveOwnership.mqh"
 #include "Include/Letra37/CurveLife.mqh"
 #include "Include/Letra37/TradeManager.mqh"
@@ -71,6 +72,7 @@ int OnInit()
    Erf_Init();
    Signals_Init();
    TimeIntel_Init();
+   CurveTree_Init();
    CurveOwnership_Init();
    CurveLife_Init();
    Trade_Init();

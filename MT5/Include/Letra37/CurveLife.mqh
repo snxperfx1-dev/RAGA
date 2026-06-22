@@ -65,10 +65,10 @@ void CurveLife_Compute()
    double cl=C_close(), hi=C_high(), lo=C_low();
    double atrv=IsNa(atr)?0.0:atr;
 
-   //--- owner curve = canonical M5 wave
-   int    ownDir = l0_dir;
-   double ownOrig= se5_inv;
-   double ownExt = (ownDir==1) ? se5_sh : (ownDir==-1) ? se5_sl : PINE_NA;
+   //--- owner curve = the curve-tree owner (authoritative), fallback to canonical M5
+   int    ownDir = ct_ownDir!=0 ? ct_ownDir : l0_dir;
+   double ownOrig= !IsNa(ct_ownOrig) ? ct_ownOrig : se5_inv;
+   double ownExt = !IsNa(ct_ownExt) ? ct_ownExt : ((ownDir==1) ? se5_sh : (ownDir==-1) ? se5_sl : PINE_NA);
    cl_ownDir = ownDir;
    cl_counterDir = -ownDir;
 
@@ -78,7 +78,7 @@ void CurveLife_Compute()
    double cmp5 = g_compHist.Has(5) ? g_compHist.Get(5) : cmpNow;
    double cmpTighten = cmpNow - cmp5;
    double eRes = re_residualEnergyScore;
-   int    treeDepth = (int)se5_rec;
+   int    treeDepth = ct_treeDepth;
    int    budget = co_expectedDepth;   // geometry-aware curve budget (Principle 4)
    bool   recComplete = (budget>0 && treeDepth>=budget);
 
@@ -117,6 +117,12 @@ void CurveLife_Compute()
    else if(cl_life>=60.0)                          { cl_state="ALIVE"; cl_aliveTx="ALIVE - HOLD"; }
    else if(cl_life<=32.0)                          { cl_state="DEAD";  cl_aliveTx=(ownDir==1?"DEAD - FLIP SHORT":"DEAD - FLIP LONG"); }
    else                                            { cl_state="WEAKENING"; cl_aliveTx="WEAKENING - MANAGE"; }
+
+   //--- FU-merge / ownership transfer override (Principle 9)
+   if(ct_transferred)
+     { cl_life=MathMin(cl_life,30.0); cl_state="DEAD"; cl_aliveTx="DEAD - OWNERSHIP TRANSFERRED ("+ct_ownStateTx+")"; }
+   else if(ct_merged && cl_state=="DEAD")
+     { cl_life=MathMax(cl_life,50.0); cl_state="WEAKENING"; cl_aliveTx="HOLD - child MERGED back to parent"; }
 
    //--- migrated ownership band (0.5 / 0.618 of the owner leg)
    cl_mig50  = (IsNa(ownOrig)||IsNa(ownExt)) ? PINE_NA : ownExt + 0.5  *(ownOrig-ownExt);

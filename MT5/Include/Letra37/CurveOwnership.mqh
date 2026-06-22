@@ -96,8 +96,8 @@ void CurveOwnership_Compute()
    else
       co_expectedDepth = (int)MathMax(1.0, MathMin(4.0, 1.0+MathRound(comp/33.0)));
 
-   //--- recursion depth + dominance transfer (from the structure engine)
-   co_recDepth = (int)se5_rec;
+   //--- recursion depth + dominance transfer (from the curve tree + structure engine)
+   co_recDepth = ct_treeDepth;
    co_newPct = Clamp(se5_dom, 0.0, 100.0);
    co_oldPct = 100.0-co_newPct;
    co_transferComplete = co_newPct>=50.0;
