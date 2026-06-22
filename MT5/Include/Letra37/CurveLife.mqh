@@ -79,7 +79,7 @@ void CurveLife_Compute()
    double cmpTighten = cmpNow - cmp5;
    double eRes = re_residualEnergyScore;
    int    treeDepth = (int)se5_rec;
-   int    budget = (int)MathMax(1.0, MathMin(4.0, 1.0+MathRound(cmpNow/33.0)));
+   int    budget = co_expectedDepth;   // geometry-aware curve budget (Principle 4)
    bool   recComplete = (budget>0 && treeDepth>=budget);
 
    cl_cpForce = Clamp(cmpNow*0.50 + eRes*0.20 - treeDepth*12.0 + MathMax(0.0,cmpTighten)*0.8 + 8.0, 0.0, 100.0);

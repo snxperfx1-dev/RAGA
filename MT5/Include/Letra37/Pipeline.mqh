@@ -55,6 +55,7 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    WaveSpawn_Compute(); // Sec 13-14
    Signals_Compute();   // Sec 15-24
    TimeIntel_Compute(); // Time Intelligence Engine (context)
+   CurveOwnership_Compute(); // F72 recursive curve ownership (budget/building-vs-entry)
    CurveLife_Compute(); // F72 curve-life (open-trade management)
   }
 

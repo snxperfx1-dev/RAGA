@@ -35,6 +35,10 @@ void Dash_Update()
    s += "CurveLife : " + cl_aliveTx + "  (life "+DoubleToString(cl_life,0)+")" + nl;
    s += "  force   : " + cl_cpState+" "+cl_cpTrend+"   narr "+cl_narrState+"   chain "+cl_chainScope + nl;
    s += "  HTF     : " + cl_htfThreat+(IsNa(cl_htfRoomAtr)?"":"  "+DoubleToString(cl_htfRoomAtr,1)+" ATR") + nl;
+   s += "Ownership : "+co_buildingVsEntry+"  ["+co_entryReadiness+"]   owner "+co_ownerLabel + nl;
+   s += "  campaign: "+co_campaign+" / "+co_location+"   "+co_compRegime + nl;
+   s += "  recurse : depth "+IntegerToString(co_recDepth)+"/"+IntegerToString(co_expectedDepth)+"   dom old "+DoubleToString(co_oldPct,0)+"/new "+DoubleToString(co_newPct,0)+(co_transferComplete?" XFER":"")+"   budget "+DoubleToString(co_remainingBudget,0)+"%" + nl;
+   s += "  particip: "+co_partZone + nl;
    s += "TimeIntel : dir "+DirWord(timeDir)+"  align "+DoubleToString(timeAlign,0)+"%   H1 "+h1Timing+" ("+tH1State+")" + nl;
    s += "TradeState: " + (tradeDir==1?"LONG":tradeDir==-1?"SHORT":"FLAT") + "   positions "+IntegerToString(Trade_CountPositions()) + nl;
    s += "Vol regime: " + phys_volRegime + "  ATR "+DoubleToString(IsNa(atr)?0.0:atr,_Digits);
