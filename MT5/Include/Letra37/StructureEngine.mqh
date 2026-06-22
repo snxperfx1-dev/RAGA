@@ -1,17 +1,26 @@
 //+------------------------------------------------------------------+
 //|  StructureEngine.mqh - the fixed-timeframe structure engine      |
+//|                       (V60 14-PHASE upgrade)                     |
 //|                                                                  |
-//|  Faithful port of f_se(): a self-contained structure state       |
-//|  machine that computes (using ONLY its own timeframe series):    |
-//|    physics, swings, pivot memory, BOS/CHoCH, impulse, direction  |
-//|    + Point4 / invalidation / target, a monotonic lifecycle phase |
-//|    state and a live phase code, plus FRZ / waveProgress /         |
-//|    convexity-maturity / model-fit.                               |
+//|  Port of f_se(): a self-contained structure state machine that   |
+//|  computes (using ONLY its own timeframe series): physics,        |
+//|  swings, pivot memory, BOS/CHoCH, impulse, direction + Point4 /  |
+//|  invalidation / target, and the V60 14-phase lifecycle driven    |
+//|  by a COMPRESSION INDEX, RECURSIVE-TRANSITION counting and       |
+//|  DOMINANCE TRANSFER. It models how a move dies and hands off:    |
+//|    Expansion -> Pre-Convexity -> Induction -> Liquidity ->       |
+//|    New High/Low -> Transition -> Retracement -> HTF Flip Zone -> |
+//|    Induction -> Liquidation -> Terminal Curve -> Return.         |
 //|                                                                  |
-//|  Six instances run on M1/M3/M5/M15/H1/H4. The live direction of  |
-//|  each layer is recomputed against the chart close (origin-based) |
-//|  exactly as f_waveDirByOrigin() does, then aggregated into the   |
-//|  fractal stack and Engine 1A phase authority.                    |
+//|  DIR-FIX: the order block is ordered by ACTUAL price (hi/lo),    |
+//|  and invalidation is pinned to the protective extreme (zone low  |
+//|  for longs, zone high for shorts) so a flip/CHoCH spawn can no    |
+//|  longer invert the wave-direction stack.                         |
+//|                                                                  |
+//|  Six instances run on the adaptive timeframe ladder. The live    |
+//|  direction of each layer is recomputed against the chart close   |
+//|  (origin-based), then aggregated into the fractal stack and      |
+//|  Engine 1A phase authority.                                      |
 //+------------------------------------------------------------------+
 #property strict
 
@@ -30,8 +39,16 @@ double fractalCtxScore=0.0;
 int    liveWaveDir=0;
 int    liveHtfAlign=0;
 
+//--- V60 extras + per-rung exports (consumed by CurveLife / TimeIntel / Trade)
+double se5_comp=0.0, se5_rec=0.0, se5_dom=0.0;
+double se5_inv=PINE_NA, se5_sh=PINE_NA, se5_sl=PINE_NA, se5_ft=PINE_NA, se5_fb=PINE_NA;
+double se15_tgt=PINE_NA;
+double se60_inv=PINE_NA, se60_sh=PINE_NA, se60_sl=PINE_NA, se60_ft=PINE_NA, se60_fb=PINE_NA, se60_tgt=PINE_NA, se60_wp=0.0, se60_comp=0.0;
+double se240_inv=PINE_NA, se240_sh=PINE_NA, se240_sl=PINE_NA, se240_ft=PINE_NA, se240_fb=PINE_NA, se240_tgt=PINE_NA, se240_wp=0.0, se240_comp=0.0;
+int    se60_phCode=0, se240_phCode=0;
+
 //==================================================================
-//  phase code -> canonical lifecycle string (f_phaseStr)
+//  phase code -> canonical lifecycle string (V60 14-phase)
 //==================================================================
 string PhaseStr(const int c)
   {
@@ -43,25 +60,29 @@ string PhaseStr(const int c)
       case 4:  return "Expansion Liquidity";
       case 5:  return "New High";
       case 6:  return "New Low";
-      case 7:  return "Absorption";
+      case 7:  return "Transition";
       case 8:  return "Retracement";
-      case 9:  return "Retracement Pre-Convexity";
-      case 10: return "Retracement Induction";
-      case 11: return "Retracement Liquidity";
-      case 12: return "Demand Return";
-      case 13: return "Supply Return";
+      case 9:  return "HTF Flip Zone";
+      case 10: return "Induction";
+      case 11: return "Liquidation";
+      case 12: return "Terminal Curve";
+      case 13: return "Demand Return";
+      case 14: return "Supply Return";
       default: return "Point 4 Origin";
      }
   }
 
 //  canonical phase -> hypothesis family (ie1a_hypFamily)
+//  Transition maps to the ABSORPTION family (the move dying / handing off);
+//  HTF Flip Zone / Induction / Liquidation / Terminal Curve are the retracement
+//  family (counter-trend delivery into the zone).
 string HypFamily(const string ph)
   {
    if(ph=="Expansion") return "EXPANSION";
    if(ph=="Expansion Pre-Convexity" || ph=="Expansion Induction" || ph=="Expansion Liquidity") return "CONVEXITY FORMING";
    if(ph=="New High" || ph=="New Low") return "CREATION FORMING";
-   if(ph=="Absorption") return "ABSORPTION";
-   if(ph=="Retracement" || ph=="Retracement Pre-Convexity" || ph=="Retracement Induction" || ph=="Retracement Liquidity") return "RETRACEMENT";
+   if(ph=="Transition") return "ABSORPTION";
+   if(ph=="Retracement" || ph=="HTF Flip Zone" || ph=="Induction" || ph=="Liquidation" || ph=="Terminal Curve") return "RETRACEMENT";
    if(ph=="Demand Return" || ph=="Supply Return") return "DEMAND/SUPPLY RETURN";
    return "EXPANSION";
   }
@@ -72,8 +93,25 @@ bool PhaseIsExpSide(const string ph)
           ph=="Expansion Liquidity" || ph=="New High" || ph=="New Low");
   }
 
+//  short phase-family label (multi-timeframe panels / curve map)
+string PhaseFamS(const string p)
+  {
+   if(StringFind(p,"Transition")>=0)   return "Transition";
+   if(StringFind(p,"Terminal")>=0)     return "Terminal";
+   if(StringFind(p,"Liquidation")>=0)  return "Liquidation";
+   if(StringFind(p,"HTF Flip")>=0)     return "Flip Zone";
+   if(StringFind(p,"Induction")>=0 && StringFind(p,"Expansion")<0) return "Induction";
+   if(StringFind(p,"Pre-Convexity")>=0) return "Pre-Conv";
+   if(StringFind(p,"Expansion Induction")>=0) return "Induction";
+   if(StringFind(p,"Liquidity")>=0)    return "Liquidity";
+   if(StringFind(p,"New High")>=0 || StringFind(p,"New Low")>=0) return "Creation";
+   if(StringFind(p,"Return")>=0)       return "Return";
+   if(StringFind(p,"Retracement")>=0)  return "Retracement";
+   return "Expansion";
+  }
+
 //==================================================================
-//| CStructEngine - one f_se instance                              |
+//| CStructEngine - one f_se instance (V60 14-phase)               |
 //==================================================================
 class CStructEngine
   {
@@ -100,11 +138,14 @@ private:
    double m_protSw, m_protSw2, m_indOrig, m_indExt;
    bool   m_indBrk;
    int    m_lastDirSeen;
-   int    m_phaseState;
+   int    m_pst;            // 0..13 single-latch phase state
+   //--- recursive transition
+   int    m_recBrk;
+   bool   m_recArm;
 public:
    //--- outputs (se*_*)
-   int    oDir, oPh, oBos, oCh;
-   double oSH, oSL, oPSH, oPSL, oP4h, oP4l, oInv, oTgt, oFt, oFb, oFs, oWp, oCm, oMf;
+   int    oDir, oPh, oBos, oCh, oRec;
+   double oSH, oSL, oPSH, oPSL, oP4h, oP4l, oInv, oTgt, oFt, oFb, oFs, oWp, oCm, oMf, oComp, oDom;
    datetime lastOpen;
 
    void   Init()
@@ -122,11 +163,12 @@ public:
       m_dir=0; m_ft=PINE_NA; m_fb=PINE_NA; m_p4h=PINE_NA; m_p4l=PINE_NA;
       m_inv=PINE_NA; m_tgt=PINE_NA; m_cycH=PINE_NA; m_cycL=PINE_NA;
       m_bos1=false; m_bos2=false; m_protSw=PINE_NA; m_protSw2=PINE_NA;
-      m_indOrig=PINE_NA; m_indExt=PINE_NA; m_indBrk=false; m_lastDirSeen=0; m_phaseState=0;
-      oDir=0; oPh=0; oBos=0; oCh=0;
+      m_indOrig=PINE_NA; m_indExt=PINE_NA; m_indBrk=false; m_lastDirSeen=0; m_pst=0;
+      m_recBrk=0; m_recArm=true;
+      oDir=0; oPh=0; oBos=0; oCh=0; oRec=0;
       oSH=PINE_NA; oSL=PINE_NA; oPSH=PINE_NA; oPSL=PINE_NA;
       oP4h=PINE_NA; oP4l=PINE_NA; oInv=PINE_NA; oTgt=PINE_NA; oFt=PINE_NA; oFb=PINE_NA;
-      oFs=0; oWp=0; oCm=0; oMf=0; lastOpen=0;
+      oFs=0; oWp=0; oCm=0; oMf=0; oComp=0; oDom=0; lastOpen=0;
      }
 
    void   Update(const double o,const double h,const double l,const double c)
@@ -180,7 +222,7 @@ public:
       bool _eLong =(!IsNa(_pH))&&(m_prevD==-1)&&(!IsNa(m_prevP))&&((_pH-m_prevP)>atrv*impM);
       bool _eShort=(!IsNa(_pL))&&(m_prevD==1 )&&(!IsNa(m_prevP))&&((m_prevP-_pL)>atrv*impM);
 
-      //---- DIRECTION / POINT4 / INVALIDATION / TARGET ----
+      //---- DIRECTION / POINT4 / INVALIDATION / TARGET (DIR-FIX) ----
       bool _hasCtx=(m_dir!=0)&&(!IsNa(m_ft));
       bool _flipDn=(m_dir==1)&&_bearCH;
       bool _flipUp=(m_dir==-1)&&_bullCH;
@@ -189,19 +231,21 @@ public:
       if(_spawn)
         {
          int _nd=_eLong?1:_eShort?-1:_flipUp?1:-1;
-         double _obT=(_nd==1)?m_lastP:m_prevP;
-         double _obB=(_nd==1)?m_prevP:m_lastP;
-         m_dir=_nd; m_ft=_obT; m_fb=_obB; m_p4h=_obT; m_p4l=_obB; m_cycH=h; m_cycL=l;
-         m_inv=(_nd==1)?_obB:_obT;
+         //--- order the order-block by ACTUAL price, not pivot recency.
+         double _hi=MathMax(m_lastP,m_prevP);
+         double _lo=MathMin(m_lastP,m_prevP);
+         m_dir=_nd; m_ft=_hi; m_fb=_lo; m_p4h=_hi; m_p4l=_lo; m_cycH=h; m_cycL=l;
+         //--- invalidation pinned to the protective extreme.
+         m_inv=(_nd==1)?_lo:_hi;
          double _rng=(!IsNa(m_prSH)&&!IsNa(m_prSL))?MathAbs(m_prSH-m_prSL):atrv*5.0;
-         m_tgt=(_nd==1)?Nz(_obT,c)+_rng:Nz(_obB,c)-_rng;
+         m_tgt=(_nd==1)?Nz(m_ft,c)+_rng:Nz(m_fb,c)-_rng;
         }
       if(m_dir==1)  m_cycH=IsNa(m_cycH)?h:MathMax(m_cycH,h);
       if(m_dir==-1) m_cycL=IsNa(m_cycL)?l:MathMin(m_cycL,l);
       int _bosOut=_bullBOS?1:_bearBOS?-1:0;
       int _chOut =_bullCH ?1:_bearCH ?-1:0;
 
-      //---- LIFECYCLE ----
+      //---- LIFECYCLE STRUCTURE (BOS1/BOS2/induction) ----
       bool _reset=(m_dir!=m_lastDirSeen);
       m_lastDirSeen=m_dir;
       if(_reset){ m_bos1=false; m_bos2=false; m_protSw=PINE_NA; m_protSw2=PINE_NA; m_indOrig=PINE_NA; m_indExt=PINE_NA; m_indBrk=false; }
@@ -230,44 +274,58 @@ public:
       bool _physTransfer   =_convScore>48.0||_absScore>40.0;
       bool _physCapacityLow=_absScore>45.0||_eff<effT*0.6;
 
-      //---- PHASE STATE (monotonic) ----
-      if(_reset) m_phaseState=0;
-      if(m_dir!=0)
-        {
-         bool _expanding=_momExpStrong||_eLong||_eShort||(m_dir==1?_bullImp:_bearImp);
-         if(m_phaseState<1 && _expanding && !_physTransfer && !_physCapacityLow) m_phaseState=1;
-         if(m_phaseState<2 && m_bos1 && _momDecaying && _physConvexDevel) m_phaseState=2;
-         if(m_phaseState<3 && m_bos1 && _momCounter && _physTransfer) m_phaseState=3;
-         if(m_phaseState<4 && m_bos2 && (_momDecaying||_momCounter) && _physTransfer) m_phaseState=4;
-         if(m_phaseState<5 && m_indBrk && _momExpStrong && !_physCapacityLow) m_phaseState=5;
-         if(m_phaseState>=5 && _momExhaust && _physCapacityLow) m_phaseState=7;
-         if(m_phaseState>=5 && _momCounter && !_momExhaust && _physTransfer) m_phaseState=8;
-        }
-      int _phase=m_phaseState;
-      if(m_dir!=0)
-        {
-         if(_momExhaust && _physCapacityLow) _phase=7;
-         else if(_momCounter && _physTransfer)
-            _phase = (m_phaseState>=5) ? (_convScore>40.0?10:_momDecaying?9:8) : (m_bos2?4:3);
-         else if(_momExpStrong)
-            _phase = (m_phaseState>=5)?m_phaseState:((m_bos2&&_physTransfer)?4:((m_bos1&&_physConvexDevel)?2:1));
-         else if(_momDecaying)
-            _phase = (m_phaseState>=5)?m_phaseState:4;
-         else if(m_phaseState==0) _phase=1;
-         else _phase=m_phaseState;
-        }
-      if(_phase==5 && m_dir==-1) _phase=6;
+      //---- DIRECTION (origin-based) + geometry ----
+      int   _wdir   = (!IsNa(m_inv)) ? (c>m_inv?1:(c<m_inv?-1:m_dir)) : m_dir;
+      bool  _atFlip = (!IsNa(m_ft)&&!IsNa(m_fb)&&c<=m_ft&&c>=m_fb);
+      bool  _expanding = _momExpStrong||_eLong||_eShort||(_wdir==1?_bullImp:_bearImp);
+      bool  _atExtreme = _wdir==1 ? (h>=Nz(m_cycH,h)) : _wdir==-1 ? (l<=Nz(m_cycL,l)) : false;
+      double _extr   = _wdir==1 ? Nz(m_cycH,c) : Nz(m_cycL,c);
+      bool  _extended = (!IsNa(m_inv)) && (MathAbs(_extr-m_inv)>atrv*1.5);
+      double _fzMid  = (!IsNa(m_ft)&&!IsNa(m_fb)) ? (m_ft+m_fb)/2.0 : PINE_NA;
+      double _retrFrac = (!IsNa(_fzMid)&&MathAbs(_extr-_fzMid)>1e-10) ? MathAbs(_extr-c)/MathAbs(_extr-_fzMid) : 0.0;
+      //--- COMPRESSION INDEX (0..100): high when displacement & efficiency are LOW
+      double _compIdx = Clamp((1.0-PineMin(_disp/MathMax(dispT,1e-10),1.0))*60.0 + (1.0-PineMin(_eff/MathMax(effT,1e-10),1.0))*40.0, 0.0, 100.0);
 
-      double _wp = (m_phaseState==0)?10.0:(m_phaseState==1)?25.0:(m_phaseState==2)?40.0:(m_phaseState==3)?55.0:(m_phaseState==4)?68.0:(m_phaseState==5)?80.0:(m_phaseState==7)?92.0:85.0;
+      //---- RECURSIVE TRANSITION + DOMINANCE TRANSFER ----
+      bool _phase2CH = (m_dir==1 && _bearCH)||(m_dir==-1 && _bullCH);
+      if(_reset || (_atExtreme && _extended)){ m_recBrk=0; m_recArm=true; }
+      if((m_dir==1 && !IsNa(_pH))||(m_dir==-1 && !IsNa(_pL))) m_recArm=true;
+      if((_phase2CH||_oppBOS) && m_recArm && !_atExtreme){ m_recBrk=m_recBrk+1; m_recArm=false; }
+      double _recDom = PineMin(MathMax(m_recBrk*(30.0-_compIdx*0.15), _retrFrac*80.0), 100.0);
+      bool   _transferDone = _recDom>=50.0;
+
+      //---- SINGLE-LATCH PHASE STATE MACHINE (0 -> 13) ----
+      if(_reset) m_pst=0;
+      if(m_dir!=0 && !_reset)
+        {
+         if(m_pst==0 && _expanding) m_pst=1;
+         if(m_pst==1 && !_atExtreme && _momDecaying && _physConvexDevel) m_pst=2;
+         if(m_pst==2 && !_atExtreme && _momCounter && _physTransfer) m_pst=3;
+         if(m_pst==3 && !_atExtreme && (m_bos1||m_bos2||m_indBrk) && _physTransfer) m_pst=4;
+         if(m_pst>=1 && m_pst<=7 && _atExtreme && _extended) m_pst=5;
+         if(m_pst==5 && !_atExtreme && (m_recBrk>=1 || _momExhaust)) m_pst=7;
+         if(m_pst==7 && _transferDone) m_pst=8;
+         if(m_pst==8 && _atFlip) m_pst=9;
+         if(m_pst==9 && ((m_dir==1 && _bullImp)||(m_dir==-1 && _bearImp))) m_pst=10;
+         if(m_pst==10 && (_oppBOS || _physCapacityLow)) m_pst=11;
+         if(m_pst==11 && ((m_dir==1 && l<m_fb)||(m_dir==-1 && h>m_ft))) m_pst=12;
+         if(m_pst==12 && ((m_dir==1 && _bullCH)||(m_dir==-1 && _bearCH))) m_pst=13;
+        }
+      int _phase=m_pst;
+      if(_phase==5 && m_dir==-1) _phase=6;
+      if(_phase==13 && m_dir==-1) _phase=14;
+
+      double _wp = m_pst==0?5.0:m_pst==1?15.0:m_pst==2?25.0:m_pst==3?33.0:m_pst==4?42.0:m_pst==5?55.0:m_pst==7?65.0:m_pst==8?75.0:m_pst==9?85.0:m_pst==10?90.0:m_pst==11?94.0:m_pst==12?97.0:100.0;
       double _cm = PineMin(_convScore,100.0);
       double _mf = PineMin(MathMax(_expScore,MathMax(_absScore,_convScore))*0.70+(m_dir!=0?30.0:0.0),100.0);
       double _frzS=PineMin((_eLong||_eShort?50.0:0.0)+_expScore*0.30+_convScore*0.20,100.0);
-      int _dirLabel = (!IsNa(m_inv)) ? (c>m_inv?1:(c<m_inv?-1:m_dir)) : m_dir;
+      int _dirLabel = _wdir;
 
       //---- publish outputs ----
       oDir=_dirLabel; oPh=_phase; oSH=m_curSH; oSL=m_curSL; oPSH=m_prSH; oPSL=m_prSL;
       oBos=_bosOut; oCh=_chOut; oP4h=m_p4h; oP4l=m_p4l; oInv=m_inv; oTgt=m_tgt;
       oFt=m_ft; oFb=m_fb; oFs=_frzS; oWp=_wp; oCm=_cm; oMf=_mf;
+      oComp=_compIdx; oRec=m_recBrk; oDom=_recDom;
 
       //---- commit physics state ----
       m_velPrev=_vel; m_accPrev=_acc; m_prevClose=c; m_havePrev=true;
@@ -298,12 +356,13 @@ void Struct_FeedEngine(CStructEngine &eng,const ENUM_TIMEFRAMES tf,const datetim
 
 void Struct_FeedAll(const datetime moment)
   {
-   Struct_FeedEngine(g_se1,  PERIOD_M1,  moment);
-   Struct_FeedEngine(g_se3,  PERIOD_M3,  moment);
-   Struct_FeedEngine(g_se5,  PERIOD_M5,  moment);
-   Struct_FeedEngine(g_se15, PERIOD_M15, moment);
-   Struct_FeedEngine(g_se60, PERIOD_H1,  moment);
-   Struct_FeedEngine(g_se240,PERIOD_H4,  moment);
+   //--- adaptive ladder (Part B): g_ladderTF[] computed in Context
+   Struct_FeedEngine(g_se1,  g_ladderTF[0], moment);
+   Struct_FeedEngine(g_se3,  g_ladderTF[1], moment);
+   Struct_FeedEngine(g_se5,  g_ladderTF[2], moment);
+   Struct_FeedEngine(g_se15, g_ladderTF[3], moment);
+   Struct_FeedEngine(g_se60, g_ladderTF[4], moment);
+   Struct_FeedEngine(g_se240,g_ladderTF[5], moment);
   }
 
 //==================================================================
@@ -319,7 +378,7 @@ int WaveDirByOrigin(const double origin,const int fallback)
   }
 
 //==================================================================
-//  Live derivation: layer dirs, fractal stack, Engine 1A
+//  Live derivation: layer dirs, fractal stack, Engine 1A, exports
 //==================================================================
 void Struct_DeriveLive()
   {
@@ -336,6 +395,15 @@ void Struct_DeriveLive()
    se5_tgt   = g_se5.oTgt;
    se5_mf    = g_se5.oMf;
    se5_wp    = g_se5.oWp;
+
+   //--- V60 extras + per-rung exports
+   se5_comp=g_se5.oComp; se5_rec=g_se5.oRec; se5_dom=g_se5.oDom;
+   se5_inv=g_se5.oInv; se5_sh=g_se5.oSH; se5_sl=g_se5.oSL; se5_ft=g_se5.oFt; se5_fb=g_se5.oFb;
+   se15_tgt=g_se15.oTgt;
+   se60_inv=g_se60.oInv; se60_sh=g_se60.oSH; se60_sl=g_se60.oSL; se60_ft=g_se60.oFt; se60_fb=g_se60.oFb;
+   se60_tgt=g_se60.oTgt; se60_wp=g_se60.oWp; se60_comp=g_se60.oComp; se60_phCode=g_se60.oPh;
+   se240_inv=g_se240.oInv; se240_sh=g_se240.oSH; se240_sl=g_se240.oSL; se240_ft=g_se240.oFt; se240_fb=g_se240.oFb;
+   se240_tgt=g_se240.oTgt; se240_wp=g_se240.oWp; se240_comp=g_se240.oComp; se240_phCode=g_se240.oPh;
 
    l0_phaseCanon = PhaseStr(g_se5.oPh);
 

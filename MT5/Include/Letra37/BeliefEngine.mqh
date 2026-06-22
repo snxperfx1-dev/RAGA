@@ -188,15 +188,16 @@ void Belief_FeedOne(CHtfBelief &eng,const ENUM_TIMEFRAMES tf,const datetime mome
 
 void Belief_FeedM1(const datetime moment)
   {
+   ENUM_TIMEFRAMES tf = g_ladderTF[0];   // lowest ladder rung (M1 at/below H1)
    int shifts[];
-   int n=Ctx_PendingBars(PERIOD_M1, g_m1.lastOpen, moment, shifts);
+   int n=Ctx_PendingBars(tf, g_m1.lastOpen, moment, shifts);
    for(int i=0;i<n;i++)
      {
       int s=shifts[i];
-      double o=iOpen(_Symbol,PERIOD_M1,s),h=iHigh(_Symbol,PERIOD_M1,s),l=iLow(_Symbol,PERIOD_M1,s),c=iClose(_Symbol,PERIOD_M1,s);
+      double o=iOpen(_Symbol,tf,s),h=iHigh(_Symbol,tf,s),l=iLow(_Symbol,tf,s),c=iClose(_Symbol,tf,s);
       if(o==0&&h==0&&l==0&&c==0) continue;
       g_m1.Update(o,h,l,c);
-      g_m1.lastOpen=iTime(_Symbol,PERIOD_M1,s);
+      g_m1.lastOpen=iTime(_Symbol,tf,s);
      }
   }
 

@@ -206,7 +206,9 @@ void Signals_Compute()
    if(shortSignal){ lastSignalBar=g_barIndex; lastShortBar=g_barIndex; engineArmed=false; }
 
    //==================== SECTION 24 - TRADE STATE ===============
-   bool phaseAbsRetr = (ie1a_currentPhase=="Absorption"||ie1a_currentPhase=="Retracement");
+   //  V60 14-phase vocabulary: the move "dying" is Transition (was Absorption);
+   //  Retracement still signals the counter-leg taking over.
+   bool phaseAbsRetr = (ie1a_currentPhase=="Transition"||ie1a_currentPhase=="Retracement");
    exitCondition =
         (tradeDir==1 && bearBOS) || (tradeDir==-1 && bullBOS) ||
         (tradeDir==1 && bearConvShift && energy<g_energyPrev) ||

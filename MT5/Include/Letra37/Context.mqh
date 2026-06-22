@@ -45,6 +45,36 @@ CRing g_O, g_H, g_L, g_C, g_V;     // open/high/low/close/volume rings
 long  g_barIndex = -1;             // mirrors Pine bar_index (0-based)
 datetime g_lastWorkBarTime = 0;    // last processed work-TF bar open time
 
+//==================================================================
+//  Adaptive timeframe ladder (V60 fix).
+//  The six structure engines run on g_ladderTF[0..5] (rung 3 / index 2
+//  is the canonical Engine-1A wave). At/below H1 the ladder is the
+//  native intraday set M1/M3/M5/M15/H1/H4 (unchanged behaviour). Above
+//  H1 it CLIMBS the standard MT5 timeframes instead of collapsing every
+//  rung to the chart timeframe (which used to pin the fractal score at
+//  100%); all six rungs stay distinct and >= the work timeframe.
+//==================================================================
+ENUM_TIMEFRAMES g_ladderTF[6];
+
+void Ctx_BuildLadder()
+  {
+   int sec = PeriodSeconds(cfg_workTF);
+   if(sec<=3600)
+     {
+      g_ladderTF[0]=PERIOD_M1;  g_ladderTF[1]=PERIOD_M3;  g_ladderTF[2]=PERIOD_M5;
+      g_ladderTF[3]=PERIOD_M15; g_ladderTF[4]=PERIOD_H1;  g_ladderTF[5]=PERIOD_H4;
+      return;
+     }
+   ENUM_TIMEFRAMES master[9];
+   master[0]=PERIOD_M1;  master[1]=PERIOD_M3;  master[2]=PERIOD_M5;
+   master[3]=PERIOD_M15; master[4]=PERIOD_H1;  master[5]=PERIOD_H4;
+   master[6]=PERIOD_D1;  master[7]=PERIOD_W1;  master[8]=PERIOD_MN1;
+   int wi=8;
+   for(int i=0;i<9;i++){ if(PeriodSeconds(master[i])>=sec){ wi=i; break; } }
+   int start=wi-2; if(start<0) start=0; if(start>3) start=3;
+   for(int i=0;i<6;i++) g_ladderTF[i]=master[start+i];
+  }
+
 //--- convenience accessors for "current bar" chart series
 double C_close(const int lag=0){ return g_C.Get(lag); }
 double C_open (const int lag=0){ return g_O.Get(lag); }
@@ -100,6 +130,8 @@ void Ctx_LoadInputs()
    cfg_tf1            = InpTf1;
    cfg_tf2            = InpTf2;
    cfg_workTF         = InpWorkTF;
+
+   Ctx_BuildLadder();
 
    g_O.Init(CTX_RING_CAP);
    g_H.Init(CTX_RING_CAP);

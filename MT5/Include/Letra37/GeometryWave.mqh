@@ -263,7 +263,7 @@ void GeoWave_Compute()
    expectedNextPhase =
         (predDR>=predRetr&&predDR>=predAbs&&predDR>=predCreat&&predDR>=predConv&&predDR>=predExp)?(direction==-1?"Supply Return":"Demand Return"):
         (predRetr>=predAbs&&predRetr>=predCreat&&predRetr>=predConv&&predRetr>=predExp)?"Retracement":
-        (predAbs>=predCreat&&predAbs>=predConv&&predAbs>=predExp)?"Absorption":
+        (predAbs>=predCreat&&predAbs>=predConv&&predAbs>=predExp)?"Transition":
         (predCreat>=predConv&&predCreat>=predExp)?(direction==-1?"New Low":"New High"):
         (predConv>=predExp)?"Expansion Pre-Convexity":"Expansion";
    expectedNextProb = maxPred>0 ? PineMin(maxPred/MathMax(maxPred+30.0,1.0)*100.0,95.0) : 50.0;

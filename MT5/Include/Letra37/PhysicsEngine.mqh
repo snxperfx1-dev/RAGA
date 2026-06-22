@@ -192,18 +192,19 @@ void Phys_Init()
 //==================================================================
 void Phys_Feed(const datetime moment)
   {
+   ENUM_TIMEFRAMES tf = g_ladderTF[2];   // canonical rung (M5 at/below H1)
    int shifts[];
-   int n = Ctx_PendingBars(PERIOD_M5, g_phys.lastOpen, moment, shifts);
+   int n = Ctx_PendingBars(tf, g_phys.lastOpen, moment, shifts);
    for(int i=0;i<n;i++)
      {
       int s = shifts[i];
-      double o=iOpen(_Symbol,PERIOD_M5,s);
-      double h=iHigh(_Symbol,PERIOD_M5,s);
-      double l=iLow (_Symbol,PERIOD_M5,s);
-      double c=iClose(_Symbol,PERIOD_M5,s);
+      double o=iOpen(_Symbol,tf,s);
+      double h=iHigh(_Symbol,tf,s);
+      double l=iLow (_Symbol,tf,s);
+      double c=iClose(_Symbol,tf,s);
       if(o==0&&h==0&&l==0&&c==0) continue;
       g_phys.Update(o,h,l,c);
-      g_phys.lastOpen = iTime(_Symbol,PERIOD_M5,s);
+      g_phys.lastOpen = iTime(_Symbol,tf,s);
      }
   }
 //+------------------------------------------------------------------+
