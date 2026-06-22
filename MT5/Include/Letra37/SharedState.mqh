@@ -63,6 +63,10 @@ bool   closeInside        = false;
 bool   preConvEvidence    = false;
 bool   inductionEvidence  = false;
 
+//--- ERF gate flags (read by WaveSpawn before Erf module is included)
+bool   erf_entryGate      = true;
+bool   erf_suppressRotation = false;
+
 //==================================================================
 void SharedState_Init()
   {
