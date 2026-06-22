@@ -142,26 +142,43 @@ int Ctx_PendingBars(const ENUM_TIMEFRAMES tf,const datetime lastOpenTime,const d
    if(per<=0) return 0;
    int bars = Bars(_Symbol, tf);
    if(bars<=1) return 0;
-   //--- collect closed bars (shift>=1) with closeTime<=moment and openTime>lastOpenTime
-   //--- iterate from oldest unprocessed to newest closed (shift 1)
-   //--- find max shift to consider (cap to ring capacity)
-   int maxShift = (int)MathMin(bars-1, CTX_RING_CAP-2);
-   //--- gather descending then reverse
-   int tmp[];
-   ArrayResize(tmp,0);
-   for(int s=maxShift; s>=1; s--)
+
+   //--- endShift = smallest shift (>=1) whose bar has CLOSED by `moment`
+   //    (closeTime = openTime + period <= moment). As shift grows, time falls.
+   int endShift = 1;
+   while(endShift<bars-1)
+     {
+      datetime ot = iTime(_Symbol, tf, endShift);
+      if(ot==0){ endShift++; continue; }
+      if((datetime)(ot+per) <= moment) break;
+      endShift++;
+     }
+
+   //--- startShift = oldest unprocessed closed bar (largest shift) with
+   //    openTime > lastOpenTime. Bars newer than lastOpenTime have smaller shift.
+   int startShift;
+   if(lastOpenTime<=0)
+      startShift = bars-1;
+   else
+     {
+      int ls = iBarShift(_Symbol, tf, lastOpenTime, false);
+      startShift = (ls<0) ? bars-1 : ls-1;   // strictly newer than lastOpenTime
+     }
+   if(startShift>bars-1) startShift = bars-1;
+
+   //--- bound the batch to the most-recent bars (warm-up backlog safety)
+   int MAX_FEED = 8000;
+   if(startShift - endShift + 1 > MAX_FEED) startShift = endShift + MAX_FEED - 1;
+
+   //--- emit shifts oldest -> newest (largest shift down to endShift)
+   for(int s=startShift; s>=endShift; s--)
      {
       datetime ot = iTime(_Symbol, tf, s);
       if(ot==0) continue;
-      datetime ct = (datetime)(ot + per);
-      if(ot>lastOpenTime && ct<=moment)
-        {
-         int n=ArraySize(tmp); ArrayResize(tmp,n+1); tmp[n]=s;
-        }
+      if(ot<=lastOpenTime) continue;
+      if((datetime)(ot+per) > moment) continue;
+      int n=ArraySize(shiftsOut); ArrayResize(shiftsOut,n+1); shiftsOut[n]=s;
      }
-   //--- tmp is already oldest->newest because s descends (older bars have larger shift)
-   ArrayResize(shiftsOut, ArraySize(tmp));
-   for(int i=0;i<ArraySize(tmp);i++) shiftsOut[i]=tmp[i];
    return ArraySize(shiftsOut);
   }
 //+------------------------------------------------------------------+
