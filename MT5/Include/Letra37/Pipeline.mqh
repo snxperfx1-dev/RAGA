@@ -59,6 +59,7 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    CurveOwnership_Compute(); // F72 recursive curve ownership (budget/building-vs-entry)
    MtfOwnership_Compute();   // cross-TF curve-ownership map + transfer-state ladder
    CurveLife_Compute(); // F72 curve-life (open-trade management)
+   EntryCycleExec_Compute(); // F72 entry-cycle execution signal
   }
 
 //==================================================================

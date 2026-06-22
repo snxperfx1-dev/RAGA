@@ -43,6 +43,7 @@ void Dash_Update()
    s += "  nodes   : "+IntegerToString(ct_treeAlive)+" alive  depth "+IntegerToString(ct_treeDepth)+"/"+IntegerToString(ct_budgetDepth)+"   "+ct_ownStateTx + nl;
    s += "MTF own   : "+mo_ownerLabel+" "+DoubleToString(mo_ownerPct,0)+"% / "+mo_secondLabel+" "+DoubleToString(mo_secondPct,0)+"%  "+DirWord(mo_dir)+"  ["+mo_transferState+"]" + nl;
    s += "  arch    : "+mo_entryArch+"  ~"+IntegerToString(mo_expectedEntries)+" entries   Wyckoff "+IntegerToString(mo_wyckoffShifts)+"/4" + nl;
+   s += "EntryExec : "+(InpUseEntryCycleExec?"ON":"off")+"  "+(ec_active?"ACTIVE":"-")+(ec_ready?" READY "+DirWord(ec_dir):"")+(sigEC_long?"  >> EC LONG":sigEC_short?"  >> EC SHORT":"") + nl;
    s += "TimeIntel : dir "+DirWord(timeDir)+"  align "+DoubleToString(timeAlign,0)+"%   H1 "+h1Timing+" ("+tH1State+")" + nl;
    s += "TradeState: " + (tradeDir==1?"LONG":tradeDir==-1?"SHORT":"FLAT") + "   positions "+IntegerToString(Trade_CountPositions()) + nl;
    s += "Vol regime: " + phys_volRegime + "  ATR "+DoubleToString(IsNa(atr)?0.0:atr,_Digits);

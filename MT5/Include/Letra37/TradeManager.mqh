@@ -189,6 +189,14 @@ void Trade_OnSignals()
 
    bool wantLong  = sig_longSignal;
    bool wantShort = sig_shortSignal;
+   string tag = "letra";
+
+   //--- ADDITIVE entry-cycle execution path (F72) - never gates Letra
+   if(InpUseEntryCycleExec)
+     {
+      if(sigEC_long  && !wantLong ){ wantLong =true; tag="entry-cycle"; }
+      if(sigEC_short && !wantShort){ wantShort=true; tag="entry-cycle"; }
+     }
    if(!wantLong && !wantShort) return;
 
    //--- respect position cap & avoid stacking same dir
@@ -197,46 +205,48 @@ void Trade_OnSignals()
    if(wantLong  && nd==1)  return;       // already long
    if(wantShort && nd==-1) return;       // already short
 
+   if(wantLong)       Trade_Open(1,  tag);
+   else if(wantShort) Trade_Open(-1, tag);
+  }
+
+//==================================================================
+//  Open a position in `dir` (+1 long / -1 short) with risk-% sizing
+//  and structural/ATR stop + ATR take-profit. Shared by the Letra
+//  trigger and the entry-cycle execution path.
+//==================================================================
+void Trade_Open(const int dir,const string tag)
+  {
    double atrv = IsNa(atr) ? 0.0 : atr;
    if(atrv<=0) return;
-
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double minStop = (double)tm_stopLevel*tm_point;
 
-   if(wantLong)
+   if(dir==1)
      {
-      double entry = ask;
-      double sl;
-      if(InpUseStructSL && !IsNa(flipBot))
-         sl = MathMin(flipBot, !IsNa(l0_inv)?l0_inv:flipBot) - atrv*0.25;
-      else
-         sl = entry - atrv*InpSL_ATR;
+      double entry=ask;
+      double sl = (InpUseStructSL && !IsNa(flipBot)) ? MathMin(flipBot,!IsNa(l0_inv)?l0_inv:flipBot)-atrv*0.25 : entry-atrv*InpSL_ATR;
       if(entry-sl < minStop) sl = entry-minStop-tm_point;
-      double tp = (InpTP_ATR>0.0) ? entry + atrv*InpTP_ATR : 0.0;
+      double tp = (InpTP_ATR>0.0) ? entry+atrv*InpTP_ATR : 0.0;
       double lots = Trade_LotsForRisk(entry-sl);
       sl=NormalizeDouble(sl,tm_digits); if(tp>0) tp=NormalizeDouble(tp,tm_digits);
-      if(!g_trade.Buy(lots,_Symbol,0.0,sl,tp,InpTradeComment))
+      if(!g_trade.Buy(lots,_Symbol,0.0,sl,tp,InpTradeComment+" "+tag))
          PrintFormat("Letra37 BUY failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       else
-         PrintFormat("Letra37 BUY %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",lots,sl,tp,sig_grade,sig_finalProb);
+         PrintFormat("Letra37 BUY [%s] %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",tag,lots,sl,tp,sig_grade,sig_finalProb);
      }
-   else if(wantShort)
+   else if(dir==-1)
      {
-      double entry = bid;
-      double sl;
-      if(InpUseStructSL && !IsNa(flipTop))
-         sl = MathMax(flipTop, !IsNa(l0_inv)?l0_inv:flipTop) + atrv*0.25;
-      else
-         sl = entry + atrv*InpSL_ATR;
+      double entry=bid;
+      double sl = (InpUseStructSL && !IsNa(flipTop)) ? MathMax(flipTop,!IsNa(l0_inv)?l0_inv:flipTop)+atrv*0.25 : entry+atrv*InpSL_ATR;
       if(sl-entry < minStop) sl = entry+minStop+tm_point;
-      double tp = (InpTP_ATR>0.0) ? entry - atrv*InpTP_ATR : 0.0;
+      double tp = (InpTP_ATR>0.0) ? entry-atrv*InpTP_ATR : 0.0;
       double lots = Trade_LotsForRisk(sl-entry);
       sl=NormalizeDouble(sl,tm_digits); if(tp>0) tp=NormalizeDouble(tp,tm_digits);
-      if(!g_trade.Sell(lots,_Symbol,0.0,sl,tp,InpTradeComment))
+      if(!g_trade.Sell(lots,_Symbol,0.0,sl,tp,InpTradeComment+" "+tag))
          PrintFormat("Letra37 SELL failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       else
-         PrintFormat("Letra37 SELL %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",lots,sl,tp,sig_grade,sig_finalProb);
+         PrintFormat("Letra37 SELL [%s] %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",tag,lots,sl,tp,sig_grade,sig_finalProb);
      }
   }
 

@@ -105,6 +105,12 @@ input bool   InpUseCurveLife       = true;  // Use F72 curve-life to manage open
 input bool   InpCurveLifeFlatOnDead= true;  // Close position when owning curve is DEAD
 input bool   InpCurveLifeTightenWeak=true;  // Move SL to breakeven when WEAKENING
 
+//==================== ENTRY-CYCLE EXECUTION (F72) ================
+input group "Entry-Cycle Execution (F72)"
+input bool   InpUseEntryCycleExec = false; // Execute on recursive entry-cycle (additive to Letra)
+input int    InpEcMinWyckoff      = 2;     // Min Wyckoff shifts to confirm entry cycle (1-4)
+input bool   InpEcRequireTransfer = true;  // Require dominance transfer (transferring/complete)
+
 //==================== SESSION FILTER ==============================
 input group "Session Filter"
 input bool   InpUseSession      = false;       // Restrict trading to a session

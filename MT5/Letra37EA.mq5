@@ -44,6 +44,7 @@
 #include "Include/Letra37/CurveOwnership.mqh"
 #include "Include/Letra37/MtfOwnership.mqh"
 #include "Include/Letra37/CurveLife.mqh"
+#include "Include/Letra37/EntryCycleExec.mqh"
 #include "Include/Letra37/TradeManager.mqh"
 #include "Include/Letra37/Dashboard.mqh"
 #include "Include/Letra37/Pipeline.mqh"   // orchestration (must be last)
@@ -77,6 +78,7 @@ int OnInit()
    CurveOwnership_Init();
    MtfOwnership_Init();
    CurveLife_Init();
+   EntryCycleExec_Init();
    Trade_Init();
 
    //--- warm up the engines on history so live decisions are valid
