@@ -1,16 +1,16 @@
 //+------------------------------------------------------------------+
 //|                                          Letra37EA_AllInOne.mq5  |
 //|   Autonomous Expert Advisor - faithful single-file MQL5 port of  |
-//|   the "Letra 37" Pine Script v6 market-physics / SMC engine.     |
+//|   the "Letra 37" Pine Script v6 engine, upgraded with selected   |
+//|   V60 modules (14-phase structure engine, adaptive TF ladder,    |
+//|   Time Intelligence Engine, F72 curve-life trade management).    |
+//|   Keeps the Letra decision layer; excludes the Senseei layer.    |
 //|                                                                  |
-//|   This is the COMBINED build: every module (PineRuntime, Inputs, |
-//|   Context, SharedState, all engines, scoring/signals, trade      |
-//|   manager, dashboard and the orchestration pipeline) inlined in  |
-//|   dependency order into one self-contained file. Drop it in      |
-//|   MQL5/Experts/ and compile (F7) - no extra include files.       |
+//|   COMBINED build: every module inlined in dependency order into  |
+//|   one self-contained file. Drop in MQL5/Experts/ and compile.    |
 //+------------------------------------------------------------------+
 #property copyright "Letra 37 Port"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -347,6 +347,12 @@ input long   InpMagic           = 370037;      // Magic number
 input int    InpSlippagePoints  = 20;          // Max deviation (points)
 input string InpTradeComment    = "Letra37";   // Order comment
 
+//==================== CURVE-LIFE MANAGEMENT (F72) ================
+input group "Curve-Life Management (F72)"
+input bool   InpUseCurveLife       = true;  // Use F72 curve-life to manage open trades
+input bool   InpCurveLifeFlatOnDead= true;  // Close position when owning curve is DEAD
+input bool   InpCurveLifeTightenWeak=true;  // Move SL to breakeven when WEAKENING
+
 //==================== SESSION FILTER ==============================
 input group "Session Filter"
 input bool   InpUseSession      = false;       // Restrict trading to a session
@@ -423,6 +429,36 @@ CRing g_O, g_H, g_L, g_C, g_V;     // open/high/low/close/volume rings
 long  g_barIndex = -1;             // mirrors Pine bar_index (0-based)
 datetime g_lastWorkBarTime = 0;    // last processed work-TF bar open time
 
+//==================================================================
+//  Adaptive timeframe ladder (V60 fix).
+//  The six structure engines run on g_ladderTF[0..5] (rung 3 / index 2
+//  is the canonical Engine-1A wave). At/below H1 the ladder is the
+//  native intraday set M1/M3/M5/M15/H1/H4 (unchanged behaviour). Above
+//  H1 it CLIMBS the standard MT5 timeframes instead of collapsing every
+//  rung to the chart timeframe (which used to pin the fractal score at
+//  100%); all six rungs stay distinct and >= the work timeframe.
+//==================================================================
+ENUM_TIMEFRAMES g_ladderTF[6];
+
+void Ctx_BuildLadder()
+  {
+   int sec = PeriodSeconds(cfg_workTF);
+   if(sec<=3600)
+     {
+      g_ladderTF[0]=PERIOD_M1;  g_ladderTF[1]=PERIOD_M3;  g_ladderTF[2]=PERIOD_M5;
+      g_ladderTF[3]=PERIOD_M15; g_ladderTF[4]=PERIOD_H1;  g_ladderTF[5]=PERIOD_H4;
+      return;
+     }
+   ENUM_TIMEFRAMES master[9];
+   master[0]=PERIOD_M1;  master[1]=PERIOD_M3;  master[2]=PERIOD_M5;
+   master[3]=PERIOD_M15; master[4]=PERIOD_H1;  master[5]=PERIOD_H4;
+   master[6]=PERIOD_D1;  master[7]=PERIOD_W1;  master[8]=PERIOD_MN1;
+   int wi=8;
+   for(int i=0;i<9;i++){ if(PeriodSeconds(master[i])>=sec){ wi=i; break; } }
+   int start=wi-2; if(start<0) start=0; if(start>3) start=3;
+   for(int i=0;i<6;i++) g_ladderTF[i]=master[start+i];
+  }
+
 //--- convenience accessors for "current bar" chart series
 double C_close(const int lag=0){ return g_C.Get(lag); }
 double C_open (const int lag=0){ return g_O.Get(lag); }
@@ -478,6 +514,8 @@ void Ctx_LoadInputs()
    cfg_tf1            = InpTf1;
    cfg_tf2            = InpTf2;
    cfg_workTF         = InpWorkTF;
+
+   Ctx_BuildLadder();
 
    g_O.Init(CTX_RING_CAP);
    g_H.Init(CTX_RING_CAP);
@@ -846,18 +884,19 @@ void Phys_Init()
 //==================================================================
 void Phys_Feed(const datetime moment)
   {
+   ENUM_TIMEFRAMES tf = g_ladderTF[2];   // canonical rung (M5 at/below H1)
    int shifts[];
-   int n = Ctx_PendingBars(PERIOD_M5, g_phys.lastOpen, moment, shifts);
+   int n = Ctx_PendingBars(tf, g_phys.lastOpen, moment, shifts);
    for(int i=0;i<n;i++)
      {
       int s = shifts[i];
-      double o=iOpen(_Symbol,PERIOD_M5,s);
-      double h=iHigh(_Symbol,PERIOD_M5,s);
-      double l=iLow (_Symbol,PERIOD_M5,s);
-      double c=iClose(_Symbol,PERIOD_M5,s);
+      double o=iOpen(_Symbol,tf,s);
+      double h=iHigh(_Symbol,tf,s);
+      double l=iLow (_Symbol,tf,s);
+      double c=iClose(_Symbol,tf,s);
       if(o==0&&h==0&&l==0&&c==0) continue;
       g_phys.Update(o,h,l,c);
-      g_phys.lastOpen = iTime(_Symbol,PERIOD_M5,s);
+      g_phys.lastOpen = iTime(_Symbol,tf,s);
      }
   }
 //+------------------------------------------------------------------+
@@ -867,18 +906,27 @@ void Phys_Feed(const datetime moment)
 // =================================================================
 //+------------------------------------------------------------------+
 //|  StructureEngine.mqh - the fixed-timeframe structure engine      |
+//|                       (V60 14-PHASE upgrade)                     |
 //|                                                                  |
-//|  Faithful port of f_se(): a self-contained structure state       |
-//|  machine that computes (using ONLY its own timeframe series):    |
-//|    physics, swings, pivot memory, BOS/CHoCH, impulse, direction  |
-//|    + Point4 / invalidation / target, a monotonic lifecycle phase |
-//|    state and a live phase code, plus FRZ / waveProgress /         |
-//|    convexity-maturity / model-fit.                               |
+//|  Port of f_se(): a self-contained structure state machine that   |
+//|  computes (using ONLY its own timeframe series): physics,        |
+//|  swings, pivot memory, BOS/CHoCH, impulse, direction + Point4 /  |
+//|  invalidation / target, and the V60 14-phase lifecycle driven    |
+//|  by a COMPRESSION INDEX, RECURSIVE-TRANSITION counting and       |
+//|  DOMINANCE TRANSFER. It models how a move dies and hands off:    |
+//|    Expansion -> Pre-Convexity -> Induction -> Liquidity ->       |
+//|    New High/Low -> Transition -> Retracement -> HTF Flip Zone -> |
+//|    Induction -> Liquidation -> Terminal Curve -> Return.         |
 //|                                                                  |
-//|  Six instances run on M1/M3/M5/M15/H1/H4. The live direction of  |
-//|  each layer is recomputed against the chart close (origin-based) |
-//|  exactly as f_waveDirByOrigin() does, then aggregated into the   |
-//|  fractal stack and Engine 1A phase authority.                    |
+//|  DIR-FIX: the order block is ordered by ACTUAL price (hi/lo),    |
+//|  and invalidation is pinned to the protective extreme (zone low  |
+//|  for longs, zone high for shorts) so a flip/CHoCH spawn can no    |
+//|  longer invert the wave-direction stack.                         |
+//|                                                                  |
+//|  Six instances run on the adaptive timeframe ladder. The live    |
+//|  direction of each layer is recomputed against the chart close   |
+//|  (origin-based), then aggregated into the fractal stack and      |
+//|  Engine 1A phase authority.                                      |
 //+------------------------------------------------------------------+
 
 //================= ENGINE-1A / LAYER GLOBALS ======================
@@ -896,8 +944,16 @@ double fractalCtxScore=0.0;
 int    liveWaveDir=0;
 int    liveHtfAlign=0;
 
+//--- V60 extras + per-rung exports (consumed by CurveLife / TimeIntel / Trade)
+double se5_comp=0.0, se5_rec=0.0, se5_dom=0.0;
+double se5_inv=PINE_NA, se5_sh=PINE_NA, se5_sl=PINE_NA, se5_ft=PINE_NA, se5_fb=PINE_NA;
+double se15_tgt=PINE_NA;
+double se60_inv=PINE_NA, se60_sh=PINE_NA, se60_sl=PINE_NA, se60_ft=PINE_NA, se60_fb=PINE_NA, se60_tgt=PINE_NA, se60_wp=0.0, se60_comp=0.0;
+double se240_inv=PINE_NA, se240_sh=PINE_NA, se240_sl=PINE_NA, se240_ft=PINE_NA, se240_fb=PINE_NA, se240_tgt=PINE_NA, se240_wp=0.0, se240_comp=0.0;
+int    se60_phCode=0, se240_phCode=0;
+
 //==================================================================
-//  phase code -> canonical lifecycle string (f_phaseStr)
+//  phase code -> canonical lifecycle string (V60 14-phase)
 //==================================================================
 string PhaseStr(const int c)
   {
@@ -909,25 +965,29 @@ string PhaseStr(const int c)
       case 4:  return "Expansion Liquidity";
       case 5:  return "New High";
       case 6:  return "New Low";
-      case 7:  return "Absorption";
+      case 7:  return "Transition";
       case 8:  return "Retracement";
-      case 9:  return "Retracement Pre-Convexity";
-      case 10: return "Retracement Induction";
-      case 11: return "Retracement Liquidity";
-      case 12: return "Demand Return";
-      case 13: return "Supply Return";
+      case 9:  return "HTF Flip Zone";
+      case 10: return "Induction";
+      case 11: return "Liquidation";
+      case 12: return "Terminal Curve";
+      case 13: return "Demand Return";
+      case 14: return "Supply Return";
       default: return "Point 4 Origin";
      }
   }
 
 //  canonical phase -> hypothesis family (ie1a_hypFamily)
+//  Transition maps to the ABSORPTION family (the move dying / handing off);
+//  HTF Flip Zone / Induction / Liquidation / Terminal Curve are the retracement
+//  family (counter-trend delivery into the zone).
 string HypFamily(const string ph)
   {
    if(ph=="Expansion") return "EXPANSION";
    if(ph=="Expansion Pre-Convexity" || ph=="Expansion Induction" || ph=="Expansion Liquidity") return "CONVEXITY FORMING";
    if(ph=="New High" || ph=="New Low") return "CREATION FORMING";
-   if(ph=="Absorption") return "ABSORPTION";
-   if(ph=="Retracement" || ph=="Retracement Pre-Convexity" || ph=="Retracement Induction" || ph=="Retracement Liquidity") return "RETRACEMENT";
+   if(ph=="Transition") return "ABSORPTION";
+   if(ph=="Retracement" || ph=="HTF Flip Zone" || ph=="Induction" || ph=="Liquidation" || ph=="Terminal Curve") return "RETRACEMENT";
    if(ph=="Demand Return" || ph=="Supply Return") return "DEMAND/SUPPLY RETURN";
    return "EXPANSION";
   }
@@ -938,8 +998,25 @@ bool PhaseIsExpSide(const string ph)
           ph=="Expansion Liquidity" || ph=="New High" || ph=="New Low");
   }
 
+//  short phase-family label (multi-timeframe panels / curve map)
+string PhaseFamS(const string p)
+  {
+   if(StringFind(p,"Transition")>=0)   return "Transition";
+   if(StringFind(p,"Terminal")>=0)     return "Terminal";
+   if(StringFind(p,"Liquidation")>=0)  return "Liquidation";
+   if(StringFind(p,"HTF Flip")>=0)     return "Flip Zone";
+   if(StringFind(p,"Induction")>=0 && StringFind(p,"Expansion")<0) return "Induction";
+   if(StringFind(p,"Pre-Convexity")>=0) return "Pre-Conv";
+   if(StringFind(p,"Expansion Induction")>=0) return "Induction";
+   if(StringFind(p,"Liquidity")>=0)    return "Liquidity";
+   if(StringFind(p,"New High")>=0 || StringFind(p,"New Low")>=0) return "Creation";
+   if(StringFind(p,"Return")>=0)       return "Return";
+   if(StringFind(p,"Retracement")>=0)  return "Retracement";
+   return "Expansion";
+  }
+
 //==================================================================
-//| CStructEngine - one f_se instance                              |
+//| CStructEngine - one f_se instance (V60 14-phase)               |
 //==================================================================
 class CStructEngine
   {
@@ -966,11 +1043,14 @@ private:
    double m_protSw, m_protSw2, m_indOrig, m_indExt;
    bool   m_indBrk;
    int    m_lastDirSeen;
-   int    m_phaseState;
+   int    m_pst;            // 0..13 single-latch phase state
+   //--- recursive transition
+   int    m_recBrk;
+   bool   m_recArm;
 public:
    //--- outputs (se*_*)
-   int    oDir, oPh, oBos, oCh;
-   double oSH, oSL, oPSH, oPSL, oP4h, oP4l, oInv, oTgt, oFt, oFb, oFs, oWp, oCm, oMf;
+   int    oDir, oPh, oBos, oCh, oRec;
+   double oSH, oSL, oPSH, oPSL, oP4h, oP4l, oInv, oTgt, oFt, oFb, oFs, oWp, oCm, oMf, oComp, oDom;
    datetime lastOpen;
 
    void   Init()
@@ -988,11 +1068,12 @@ public:
       m_dir=0; m_ft=PINE_NA; m_fb=PINE_NA; m_p4h=PINE_NA; m_p4l=PINE_NA;
       m_inv=PINE_NA; m_tgt=PINE_NA; m_cycH=PINE_NA; m_cycL=PINE_NA;
       m_bos1=false; m_bos2=false; m_protSw=PINE_NA; m_protSw2=PINE_NA;
-      m_indOrig=PINE_NA; m_indExt=PINE_NA; m_indBrk=false; m_lastDirSeen=0; m_phaseState=0;
-      oDir=0; oPh=0; oBos=0; oCh=0;
+      m_indOrig=PINE_NA; m_indExt=PINE_NA; m_indBrk=false; m_lastDirSeen=0; m_pst=0;
+      m_recBrk=0; m_recArm=true;
+      oDir=0; oPh=0; oBos=0; oCh=0; oRec=0;
       oSH=PINE_NA; oSL=PINE_NA; oPSH=PINE_NA; oPSL=PINE_NA;
       oP4h=PINE_NA; oP4l=PINE_NA; oInv=PINE_NA; oTgt=PINE_NA; oFt=PINE_NA; oFb=PINE_NA;
-      oFs=0; oWp=0; oCm=0; oMf=0; lastOpen=0;
+      oFs=0; oWp=0; oCm=0; oMf=0; oComp=0; oDom=0; lastOpen=0;
      }
 
    void   Update(const double o,const double h,const double l,const double c)
@@ -1046,7 +1127,7 @@ public:
       bool _eLong =(!IsNa(_pH))&&(m_prevD==-1)&&(!IsNa(m_prevP))&&((_pH-m_prevP)>atrv*impM);
       bool _eShort=(!IsNa(_pL))&&(m_prevD==1 )&&(!IsNa(m_prevP))&&((m_prevP-_pL)>atrv*impM);
 
-      //---- DIRECTION / POINT4 / INVALIDATION / TARGET ----
+      //---- DIRECTION / POINT4 / INVALIDATION / TARGET (DIR-FIX) ----
       bool _hasCtx=(m_dir!=0)&&(!IsNa(m_ft));
       bool _flipDn=(m_dir==1)&&_bearCH;
       bool _flipUp=(m_dir==-1)&&_bullCH;
@@ -1055,19 +1136,21 @@ public:
       if(_spawn)
         {
          int _nd=_eLong?1:_eShort?-1:_flipUp?1:-1;
-         double _obT=(_nd==1)?m_lastP:m_prevP;
-         double _obB=(_nd==1)?m_prevP:m_lastP;
-         m_dir=_nd; m_ft=_obT; m_fb=_obB; m_p4h=_obT; m_p4l=_obB; m_cycH=h; m_cycL=l;
-         m_inv=(_nd==1)?_obB:_obT;
+         //--- order the order-block by ACTUAL price, not pivot recency.
+         double _hi=MathMax(m_lastP,m_prevP);
+         double _lo=MathMin(m_lastP,m_prevP);
+         m_dir=_nd; m_ft=_hi; m_fb=_lo; m_p4h=_hi; m_p4l=_lo; m_cycH=h; m_cycL=l;
+         //--- invalidation pinned to the protective extreme.
+         m_inv=(_nd==1)?_lo:_hi;
          double _rng=(!IsNa(m_prSH)&&!IsNa(m_prSL))?MathAbs(m_prSH-m_prSL):atrv*5.0;
-         m_tgt=(_nd==1)?Nz(_obT,c)+_rng:Nz(_obB,c)-_rng;
+         m_tgt=(_nd==1)?Nz(m_ft,c)+_rng:Nz(m_fb,c)-_rng;
         }
       if(m_dir==1)  m_cycH=IsNa(m_cycH)?h:MathMax(m_cycH,h);
       if(m_dir==-1) m_cycL=IsNa(m_cycL)?l:MathMin(m_cycL,l);
       int _bosOut=_bullBOS?1:_bearBOS?-1:0;
       int _chOut =_bullCH ?1:_bearCH ?-1:0;
 
-      //---- LIFECYCLE ----
+      //---- LIFECYCLE STRUCTURE (BOS1/BOS2/induction) ----
       bool _reset=(m_dir!=m_lastDirSeen);
       m_lastDirSeen=m_dir;
       if(_reset){ m_bos1=false; m_bos2=false; m_protSw=PINE_NA; m_protSw2=PINE_NA; m_indOrig=PINE_NA; m_indExt=PINE_NA; m_indBrk=false; }
@@ -1096,44 +1179,58 @@ public:
       bool _physTransfer   =_convScore>48.0||_absScore>40.0;
       bool _physCapacityLow=_absScore>45.0||_eff<effT*0.6;
 
-      //---- PHASE STATE (monotonic) ----
-      if(_reset) m_phaseState=0;
-      if(m_dir!=0)
-        {
-         bool _expanding=_momExpStrong||_eLong||_eShort||(m_dir==1?_bullImp:_bearImp);
-         if(m_phaseState<1 && _expanding && !_physTransfer && !_physCapacityLow) m_phaseState=1;
-         if(m_phaseState<2 && m_bos1 && _momDecaying && _physConvexDevel) m_phaseState=2;
-         if(m_phaseState<3 && m_bos1 && _momCounter && _physTransfer) m_phaseState=3;
-         if(m_phaseState<4 && m_bos2 && (_momDecaying||_momCounter) && _physTransfer) m_phaseState=4;
-         if(m_phaseState<5 && m_indBrk && _momExpStrong && !_physCapacityLow) m_phaseState=5;
-         if(m_phaseState>=5 && _momExhaust && _physCapacityLow) m_phaseState=7;
-         if(m_phaseState>=5 && _momCounter && !_momExhaust && _physTransfer) m_phaseState=8;
-        }
-      int _phase=m_phaseState;
-      if(m_dir!=0)
-        {
-         if(_momExhaust && _physCapacityLow) _phase=7;
-         else if(_momCounter && _physTransfer)
-            _phase = (m_phaseState>=5) ? (_convScore>40.0?10:_momDecaying?9:8) : (m_bos2?4:3);
-         else if(_momExpStrong)
-            _phase = (m_phaseState>=5)?m_phaseState:((m_bos2&&_physTransfer)?4:((m_bos1&&_physConvexDevel)?2:1));
-         else if(_momDecaying)
-            _phase = (m_phaseState>=5)?m_phaseState:4;
-         else if(m_phaseState==0) _phase=1;
-         else _phase=m_phaseState;
-        }
-      if(_phase==5 && m_dir==-1) _phase=6;
+      //---- DIRECTION (origin-based) + geometry ----
+      int   _wdir   = (!IsNa(m_inv)) ? (c>m_inv?1:(c<m_inv?-1:m_dir)) : m_dir;
+      bool  _atFlip = (!IsNa(m_ft)&&!IsNa(m_fb)&&c<=m_ft&&c>=m_fb);
+      bool  _expanding = _momExpStrong||_eLong||_eShort||(_wdir==1?_bullImp:_bearImp);
+      bool  _atExtreme = _wdir==1 ? (h>=Nz(m_cycH,h)) : _wdir==-1 ? (l<=Nz(m_cycL,l)) : false;
+      double _extr   = _wdir==1 ? Nz(m_cycH,c) : Nz(m_cycL,c);
+      bool  _extended = (!IsNa(m_inv)) && (MathAbs(_extr-m_inv)>atrv*1.5);
+      double _fzMid  = (!IsNa(m_ft)&&!IsNa(m_fb)) ? (m_ft+m_fb)/2.0 : PINE_NA;
+      double _retrFrac = (!IsNa(_fzMid)&&MathAbs(_extr-_fzMid)>1e-10) ? MathAbs(_extr-c)/MathAbs(_extr-_fzMid) : 0.0;
+      //--- COMPRESSION INDEX (0..100): high when displacement & efficiency are LOW
+      double _compIdx = Clamp((1.0-PineMin(_disp/MathMax(dispT,1e-10),1.0))*60.0 + (1.0-PineMin(_eff/MathMax(effT,1e-10),1.0))*40.0, 0.0, 100.0);
 
-      double _wp = (m_phaseState==0)?10.0:(m_phaseState==1)?25.0:(m_phaseState==2)?40.0:(m_phaseState==3)?55.0:(m_phaseState==4)?68.0:(m_phaseState==5)?80.0:(m_phaseState==7)?92.0:85.0;
+      //---- RECURSIVE TRANSITION + DOMINANCE TRANSFER ----
+      bool _phase2CH = (m_dir==1 && _bearCH)||(m_dir==-1 && _bullCH);
+      if(_reset || (_atExtreme && _extended)){ m_recBrk=0; m_recArm=true; }
+      if((m_dir==1 && !IsNa(_pH))||(m_dir==-1 && !IsNa(_pL))) m_recArm=true;
+      if((_phase2CH||_oppBOS) && m_recArm && !_atExtreme){ m_recBrk=m_recBrk+1; m_recArm=false; }
+      double _recDom = PineMin(MathMax(m_recBrk*(30.0-_compIdx*0.15), _retrFrac*80.0), 100.0);
+      bool   _transferDone = _recDom>=50.0;
+
+      //---- SINGLE-LATCH PHASE STATE MACHINE (0 -> 13) ----
+      if(_reset) m_pst=0;
+      if(m_dir!=0 && !_reset)
+        {
+         if(m_pst==0 && _expanding) m_pst=1;
+         if(m_pst==1 && !_atExtreme && _momDecaying && _physConvexDevel) m_pst=2;
+         if(m_pst==2 && !_atExtreme && _momCounter && _physTransfer) m_pst=3;
+         if(m_pst==3 && !_atExtreme && (m_bos1||m_bos2||m_indBrk) && _physTransfer) m_pst=4;
+         if(m_pst>=1 && m_pst<=7 && _atExtreme && _extended) m_pst=5;
+         if(m_pst==5 && !_atExtreme && (m_recBrk>=1 || _momExhaust)) m_pst=7;
+         if(m_pst==7 && _transferDone) m_pst=8;
+         if(m_pst==8 && _atFlip) m_pst=9;
+         if(m_pst==9 && ((m_dir==1 && _bullImp)||(m_dir==-1 && _bearImp))) m_pst=10;
+         if(m_pst==10 && (_oppBOS || _physCapacityLow)) m_pst=11;
+         if(m_pst==11 && ((m_dir==1 && l<m_fb)||(m_dir==-1 && h>m_ft))) m_pst=12;
+         if(m_pst==12 && ((m_dir==1 && _bullCH)||(m_dir==-1 && _bearCH))) m_pst=13;
+        }
+      int _phase=m_pst;
+      if(_phase==5 && m_dir==-1) _phase=6;
+      if(_phase==13 && m_dir==-1) _phase=14;
+
+      double _wp = m_pst==0?5.0:m_pst==1?15.0:m_pst==2?25.0:m_pst==3?33.0:m_pst==4?42.0:m_pst==5?55.0:m_pst==7?65.0:m_pst==8?75.0:m_pst==9?85.0:m_pst==10?90.0:m_pst==11?94.0:m_pst==12?97.0:100.0;
       double _cm = PineMin(_convScore,100.0);
       double _mf = PineMin(MathMax(_expScore,MathMax(_absScore,_convScore))*0.70+(m_dir!=0?30.0:0.0),100.0);
       double _frzS=PineMin((_eLong||_eShort?50.0:0.0)+_expScore*0.30+_convScore*0.20,100.0);
-      int _dirLabel = (!IsNa(m_inv)) ? (c>m_inv?1:(c<m_inv?-1:m_dir)) : m_dir;
+      int _dirLabel = _wdir;
 
       //---- publish outputs ----
       oDir=_dirLabel; oPh=_phase; oSH=m_curSH; oSL=m_curSL; oPSH=m_prSH; oPSL=m_prSL;
       oBos=_bosOut; oCh=_chOut; oP4h=m_p4h; oP4l=m_p4l; oInv=m_inv; oTgt=m_tgt;
       oFt=m_ft; oFb=m_fb; oFs=_frzS; oWp=_wp; oCm=_cm; oMf=_mf;
+      oComp=_compIdx; oRec=m_recBrk; oDom=_recDom;
 
       //---- commit physics state ----
       m_velPrev=_vel; m_accPrev=_acc; m_prevClose=c; m_havePrev=true;
@@ -1164,12 +1261,13 @@ void Struct_FeedEngine(CStructEngine &eng,const ENUM_TIMEFRAMES tf,const datetim
 
 void Struct_FeedAll(const datetime moment)
   {
-   Struct_FeedEngine(g_se1,  PERIOD_M1,  moment);
-   Struct_FeedEngine(g_se3,  PERIOD_M3,  moment);
-   Struct_FeedEngine(g_se5,  PERIOD_M5,  moment);
-   Struct_FeedEngine(g_se15, PERIOD_M15, moment);
-   Struct_FeedEngine(g_se60, PERIOD_H1,  moment);
-   Struct_FeedEngine(g_se240,PERIOD_H4,  moment);
+   //--- adaptive ladder (Part B): g_ladderTF[] computed in Context
+   Struct_FeedEngine(g_se1,  g_ladderTF[0], moment);
+   Struct_FeedEngine(g_se3,  g_ladderTF[1], moment);
+   Struct_FeedEngine(g_se5,  g_ladderTF[2], moment);
+   Struct_FeedEngine(g_se15, g_ladderTF[3], moment);
+   Struct_FeedEngine(g_se60, g_ladderTF[4], moment);
+   Struct_FeedEngine(g_se240,g_ladderTF[5], moment);
   }
 
 //==================================================================
@@ -1185,7 +1283,7 @@ int WaveDirByOrigin(const double origin,const int fallback)
   }
 
 //==================================================================
-//  Live derivation: layer dirs, fractal stack, Engine 1A
+//  Live derivation: layer dirs, fractal stack, Engine 1A, exports
 //==================================================================
 void Struct_DeriveLive()
   {
@@ -1202,6 +1300,15 @@ void Struct_DeriveLive()
    se5_tgt   = g_se5.oTgt;
    se5_mf    = g_se5.oMf;
    se5_wp    = g_se5.oWp;
+
+   //--- V60 extras + per-rung exports
+   se5_comp=g_se5.oComp; se5_rec=g_se5.oRec; se5_dom=g_se5.oDom;
+   se5_inv=g_se5.oInv; se5_sh=g_se5.oSH; se5_sl=g_se5.oSL; se5_ft=g_se5.oFt; se5_fb=g_se5.oFb;
+   se15_tgt=g_se15.oTgt;
+   se60_inv=g_se60.oInv; se60_sh=g_se60.oSH; se60_sl=g_se60.oSL; se60_ft=g_se60.oFt; se60_fb=g_se60.oFb;
+   se60_tgt=g_se60.oTgt; se60_wp=g_se60.oWp; se60_comp=g_se60.oComp; se60_phCode=g_se60.oPh;
+   se240_inv=g_se240.oInv; se240_sh=g_se240.oSH; se240_sl=g_se240.oSL; se240_ft=g_se240.oFt; se240_fb=g_se240.oFb;
+   se240_tgt=g_se240.oTgt; se240_wp=g_se240.oWp; se240_comp=g_se240.oComp; se240_phCode=g_se240.oPh;
 
    l0_phaseCanon = PhaseStr(g_se5.oPh);
 
@@ -1422,15 +1529,16 @@ void Belief_FeedOne(CHtfBelief &eng,const ENUM_TIMEFRAMES tf,const datetime mome
 
 void Belief_FeedM1(const datetime moment)
   {
+   ENUM_TIMEFRAMES tf = g_ladderTF[0];   // lowest ladder rung (M1 at/below H1)
    int shifts[];
-   int n=Ctx_PendingBars(PERIOD_M1, g_m1.lastOpen, moment, shifts);
+   int n=Ctx_PendingBars(tf, g_m1.lastOpen, moment, shifts);
    for(int i=0;i<n;i++)
      {
       int s=shifts[i];
-      double o=iOpen(_Symbol,PERIOD_M1,s),h=iHigh(_Symbol,PERIOD_M1,s),l=iLow(_Symbol,PERIOD_M1,s),c=iClose(_Symbol,PERIOD_M1,s);
+      double o=iOpen(_Symbol,tf,s),h=iHigh(_Symbol,tf,s),l=iLow(_Symbol,tf,s),c=iClose(_Symbol,tf,s);
       if(o==0&&h==0&&l==0&&c==0) continue;
       g_m1.Update(o,h,l,c);
-      g_m1.lastOpen=iTime(_Symbol,PERIOD_M1,s);
+      g_m1.lastOpen=iTime(_Symbol,tf,s);
      }
   }
 
@@ -2053,7 +2161,7 @@ void GeoWave_Compute()
    expectedNextPhase =
         (predDR>=predRetr&&predDR>=predAbs&&predDR>=predCreat&&predDR>=predConv&&predDR>=predExp)?(direction==-1?"Supply Return":"Demand Return"):
         (predRetr>=predAbs&&predRetr>=predCreat&&predRetr>=predConv&&predRetr>=predExp)?"Retracement":
-        (predAbs>=predCreat&&predAbs>=predConv&&predAbs>=predExp)?"Absorption":
+        (predAbs>=predCreat&&predAbs>=predConv&&predAbs>=predExp)?"Transition":
         (predCreat>=predConv&&predCreat>=predExp)?(direction==-1?"New Low":"New High"):
         (predConv>=predExp)?"Expansion Pre-Convexity":"Expansion";
    expectedNextProb = maxPred>0 ? PineMin(maxPred/MathMax(maxPred+30.0,1.0)*100.0,95.0) : 50.0;
@@ -2470,6 +2578,99 @@ void Erf_Compute()
 //+------------------------------------------------------------------+
 
 // =================================================================
+// ==== INLINED: Include/Letra37/TimeIntel.mqh
+// =================================================================
+//+------------------------------------------------------------------+
+//|  TimeIntel.mqh - Time Intelligence Engine (TIE)                  |
+//|                                                                  |
+//|  Tracks each higher cycle (Monthly / Weekly / Daily / H4 / H1):  |
+//|  is its high / low already taken, is it opening / expanding /    |
+//|  mid / terminal, and which way it is biased from its open.       |
+//|  Produces a cross-cycle timing read (timeDir / timeAlign /       |
+//|  timeConflict) and the H1 timing call. This is CONTEXT for trade |
+//|  management and timing - it does NOT gate the Letra entries.     |
+//|                                                                  |
+//|  Stateless per work bar: reads each cycle's running bar (shift 0)|
+//|  and prior bar (shift 1) directly, so no feeder is required.     |
+//+------------------------------------------------------------------+
+
+//================= TIE OUTPUTS ====================================
+int    timeDir=0;
+double timeAlign=50.0, timeConflict=50.0;
+string h1Timing="BALANCED";
+double h1LowProb=50.0;
+
+//--- per-cycle state (for management + dashboard)
+bool   tMnHt=false,tMnLt=false, tWHt=false,tWLt=false, tDHt=false,tDLt=false, tH4Ht=false,tH4Lt=false, tH1Ht=false,tH1Lt=false;
+int    tMnBias=0,tWBias=0,tDBias=0,tH4Bias=0,tH1Bias=0;
+string tH1State="—", tH4State="—", tDState="—";
+
+void TimeIntel_Init() {}
+
+//--- cycle elapsed fraction 0..1
+double TIE_Elapsed(const ENUM_TIMEFRAMES tf)
+  {
+   int per=PeriodSeconds(tf);
+   if(per<=0) return 0.0;
+   datetime ot=iTime(_Symbol,tf,0);
+   if(ot==0) return 0.0;
+   return Clamp((double)(TimeCurrent()-ot)/(double)per, 0.0, 1.0);
+  }
+
+string TIE_State(const bool ht,const bool lt,const double el)
+  {
+   if(ht && lt) return "DUAL DONE";
+   if(ht)       return "HIGH DONE";
+   if(lt)       return "LOW DONE";
+   if(el<0.15)  return "OPENING";
+   if(el<0.6)   return "EXPANDING";
+   if(el<0.9)   return "MID CYCLE";
+   return "TERMINAL";
+  }
+
+//--- evaluate one cycle: bias / high-taken / low-taken
+void TIE_Cycle(const ENUM_TIMEFRAMES tf,const double cl,int &bias,bool &ht,bool &lt)
+  {
+   double o =iOpen (_Symbol,tf,0);
+   double h =iHigh (_Symbol,tf,0);
+   double lo=iLow  (_Symbol,tf,0);
+   double ph=iHigh (_Symbol,tf,1);
+   double pl=iLow  (_Symbol,tf,1);
+   bias = cl>o?1:cl<o?-1:0;
+   ht = (h>ph);
+   lt = (lo<pl);
+  }
+
+void TimeIntel_Compute()
+  {
+   double cl=C_close();
+   if(IsNa(cl)) return;
+
+   TIE_Cycle(PERIOD_MN1, cl, tMnBias, tMnHt, tMnLt);
+   TIE_Cycle(PERIOD_W1,  cl, tWBias,  tWHt,  tWLt);
+   TIE_Cycle(PERIOD_D1,  cl, tDBias,  tDHt,  tDLt);
+   TIE_Cycle(PERIOD_H4,  cl, tH4Bias, tH4Ht, tH4Lt);
+   TIE_Cycle(PERIOD_H1,  cl, tH1Bias, tH1Ht, tH1Lt);
+
+   tH1State = TIE_State(tH1Ht, tH1Lt, TIE_Elapsed(PERIOD_H1));
+   tH4State = TIE_State(tH4Ht, tH4Lt, TIE_Elapsed(PERIOD_H4));
+   tDState  = TIE_State(tDHt,  tDLt,  TIE_Elapsed(PERIOD_D1));
+
+   int tBull = (tMnBias==1?1:0)+(tWBias==1?1:0)+(tDBias==1?1:0)+(tH4Bias==1?1:0)+(tH1Bias==1?1:0);
+   int tBear = (tMnBias==-1?1:0)+(tWBias==-1?1:0)+(tDBias==-1?1:0)+(tH4Bias==-1?1:0)+(tH1Bias==-1?1:0);
+   timeDir   = tBull>tBear ? 1 : tBear>tBull ? -1 : 0;
+   timeAlign = (tBull+tBear)>0 ? (double)MathMax(tBull,tBear)/(tBull+tBear)*100.0 : 50.0;
+   timeConflict = 100.0 - timeAlign;
+
+   //--- H1 low-probability + timing call
+   double h1O=iOpen(_Symbol,PERIOD_H1,0), h1H=iHigh(_Symbol,PERIOD_H1,0), h1L=iLow(_Symbol,PERIOD_H1,0);
+   double pos=(cl-h1L)/MathMax(h1H-h1L, _Point);
+   h1LowProb = (tH1Lt && !tH1Ht) ? 30.0 : (tH1Ht && !tH1Lt) ? 70.0 : MathRound(pos*100.0);
+   h1Timing = (tH1Ht && tH1Lt) ? "COMPLETION" : h1LowProb>=55 ? "LOW FIRST" : h1LowProb<=45 ? "HIGH FIRST" : "BALANCED";
+  }
+//+------------------------------------------------------------------+
+
+// =================================================================
 // ==== INLINED: Include/Letra37/ScoringSignals.mqh
 // =================================================================
 //+------------------------------------------------------------------+
@@ -2679,7 +2880,9 @@ void Signals_Compute()
    if(shortSignal){ lastSignalBar=g_barIndex; lastShortBar=g_barIndex; engineArmed=false; }
 
    //==================== SECTION 24 - TRADE STATE ===============
-   bool phaseAbsRetr = (ie1a_currentPhase=="Absorption"||ie1a_currentPhase=="Retracement");
+   //  V60 14-phase vocabulary: the move "dying" is Transition (was Absorption);
+   //  Retracement still signals the counter-leg taking over.
+   bool phaseAbsRetr = (ie1a_currentPhase=="Transition"||ie1a_currentPhase=="Retracement");
    exitCondition =
         (tradeDir==1 && bearBOS) || (tradeDir==-1 && bullBOS) ||
         (tradeDir==1 && bearConvShift && energy<g_energyPrev) ||
@@ -2713,6 +2916,177 @@ void Signals_Compute()
 
    //--- energy[1] for next bar
    g_energyPrev = energy;
+  }
+//+------------------------------------------------------------------+
+
+// =================================================================
+// ==== INLINED: Include/Letra37/CurveLife.mqh
+// =================================================================
+//+------------------------------------------------------------------+
+//|  CurveLife.mqh - F72 "is the trade alive?" engine                |
+//|                                                                  |
+//|  Instead of asking how deep a move retraces, it asks whether the |
+//|  COUNTER side can even build a move here. It scores the live      |
+//|  campaign as ALIVE (hold) / WEAKENING (manage) / DEAD (flip), and |
+//|  adds:                                                           |
+//|   - Compression persistence / ownership migration: when the      |
+//|     losing side can't generate room, support/resistance migrates |
+//|     to the 0.5-0.618 band of the expansion leg.                  |
+//|   - Narrative lineage / chain vitality: are successive pullbacks |
+//|     getting shallower (story strengthening) or deeper (fading).  |
+//|                                                                  |
+//|  The owning curve is the canonical M5 wave (se5); recursion depth |
+//|  comes from the structure engine's recursive-transition count    |
+//|  (se5_rec) and the compression index (se5_comp). Outputs are     |
+//|  consumed by the trade manager to manage OPEN trades only - they  |
+//|  never gate the Letra entries.                                   |
+//+------------------------------------------------------------------+
+
+//================= CURVE-LIFE OUTPUTS =============================
+double cl_life=50.0;
+string cl_state="WEAKENING";       // ALIVE | WEAKENING | DEAD
+int    cl_ownDir=0;                // owning curve direction
+int    cl_counterDir=0;            // flip direction when DEAD
+string cl_aliveTx="—";
+string cl_cpState="NEUTRAL";       // PERSISTING | NEUTRAL | LEAKING
+string cl_cpTrend="-> stable";
+double cl_cpForce=0.0;
+string cl_narrState="HOLDING";     // STRENGTHENING | HOLDING | WEAKENING
+double cl_narrative=50.0;
+double cl_chainVitality=50.0, cl_wholeChainLife=50.0;
+string cl_chainScope="healthy";
+double cl_mig50=PINE_NA, cl_mig618=PINE_NA;
+double cl_parentThreat=PINE_NA, cl_htfRoomAtr=PINE_NA;
+string cl_htfThreat="—";
+bool   cl_progressing=false;
+
+//--- internal persistent state
+CRing  g_compHist;
+int    g_narrDir=0;
+double g_legX=PINE_NA, g_legPBdepth=0.0;
+int    g_supVotes=0, g_degVotes=0;
+double g_seqRetr[];
+double g_lifeSeq[];
+
+void CurveLife_Init()
+  {
+   g_compHist.Init(16);
+   g_narrDir=0; g_legX=PINE_NA; g_legPBdepth=0.0;
+   g_supVotes=0; g_degVotes=0;
+   cl_narrative=50.0; cl_wholeChainLife=50.0;
+   ArrayResize(g_seqRetr,0); ArrayResize(g_lifeSeq,0);
+  }
+
+void CL_PushCap(double &arr[],const double v,const int cap)
+  {
+   int n=ArraySize(arr); ArrayResize(arr,n+1); arr[n]=v;
+   while(ArraySize(arr)>cap) ArrayRemove(arr,0,1);
+  }
+
+void CurveLife_Compute()
+  {
+   double cl=C_close(), hi=C_high(), lo=C_low();
+   double atrv=IsNa(atr)?0.0:atr;
+
+   //--- owner curve = canonical M5 wave
+   int    ownDir = l0_dir;
+   double ownOrig= se5_inv;
+   double ownExt = (ownDir==1) ? se5_sh : (ownDir==-1) ? se5_sl : PINE_NA;
+   cl_ownDir = ownDir;
+   cl_counterDir = -ownDir;
+
+   //--- compression persistence (read FROM the canonical compression)
+   double cmpNow = se5_comp;
+   g_compHist.Push(cmpNow);
+   double cmp5 = g_compHist.Has(5) ? g_compHist.Get(5) : cmpNow;
+   double cmpTighten = cmpNow - cmp5;
+   double eRes = re_residualEnergyScore;
+   int    treeDepth = (int)se5_rec;
+   int    budget = (int)MathMax(1.0, MathMin(4.0, 1.0+MathRound(cmpNow/33.0)));
+   bool   recComplete = (budget>0 && treeDepth>=budget);
+
+   cl_cpForce = Clamp(cmpNow*0.50 + eRes*0.20 - treeDepth*12.0 + MathMax(0.0,cmpTighten)*0.8 + 8.0, 0.0, 100.0);
+   cl_cpState = cl_cpForce>=60.0 ? "PERSISTING" : cl_cpForce<=35.0 ? "LEAKING" : "NEUTRAL";
+   cl_cpTrend = cmpTighten>3.0 ? "tightening" : cmpTighten<-3.0 ? "broadening" : "stable";
+
+   //--- progress guard: attacking the extreme / trend impulse = strength
+   bool attacking = ownDir==1 ? (hi>=Nz(ownExt,hi)) : ownDir==-1 ? (lo<=Nz(ownExt,lo)) : false;
+   bool trendImp  = (ownDir==1 && bullImpulse)||(ownDir==-1 && bearImpulse);
+   cl_progressing = attacking||trendImp;
+
+   //--- retrace depth from the curve's extreme
+   double retrX = (IsNa(ownExt)||IsNa(ownOrig)||ownExt==ownOrig) ? 50.0 :
+                  PineMin(MathAbs(ownExt-cl)/MathMax(MathAbs(ownExt-ownOrig),1e-10)*100.0, 100.0);
+
+   //--- HTF parent threat (H4 zone)
+   cl_parentThreat = ownDir==1 ? ((!IsNa(se240_ft)&&se240_ft>cl)?se240_ft:se240_sh) :
+                     ownDir==-1 ? ((!IsNa(se240_fb)&&se240_fb<cl)?se240_fb:se240_sl) : PINE_NA;
+   cl_htfRoomAtr = IsNa(cl_parentThreat) ? PINE_NA : MathAbs(cl_parentThreat-cl)/MathMax(atrv,1e-10);
+   cl_htfThreat = IsNa(cl_htfRoomAtr) ? "—" : cl_htfRoomAtr>3.0 ? "CLEAR runway" : cl_htfRoomAtr>1.0 ? "APPROACHING" : "AT ZONE";
+
+   //--- LIFE score
+   cl_life = Clamp(
+        cl_cpForce*0.45 + eRes*0.30 +
+        (cmpTighten>0.0 ? 12.0 : 0.0) -
+        ((recComplete && !cl_progressing) ? 25.0 : 0.0) -
+        ((cl_cpState=="LEAKING" && !cl_progressing) ? 20.0 : 0.0) +
+        (cl_progressing ? 28.0 : 0.0) +
+        (retrX<25.0 ? 16.0 : retrX<45.0 ? 6.0 : retrX>75.0 ? -12.0 : 0.0) + 10.0, 0.0, 100.0);
+
+   //--- ALIVE / WEAKENING / DEAD verdict
+   if(ownDir==0)                                   { cl_state="WEAKENING"; cl_aliveTx="no curve - wait"; }
+   else if(cl_htfThreat=="AT ZONE" && cl_life>=45) { cl_state="ALIVE"; cl_aliveTx="ALIVE - AT H4, VIGILANT"; }
+   else if(cl_progressing && cl_life>=45)          { cl_state="ALIVE"; cl_aliveTx="ALIVE - ATTACKING EXTREME"; }
+   else if(cl_life>=60.0)                          { cl_state="ALIVE"; cl_aliveTx="ALIVE - HOLD"; }
+   else if(cl_life<=32.0)                          { cl_state="DEAD";  cl_aliveTx=(ownDir==1?"DEAD - FLIP SHORT":"DEAD - FLIP LONG"); }
+   else                                            { cl_state="WEAKENING"; cl_aliveTx="WEAKENING - MANAGE"; }
+
+   //--- migrated ownership band (0.5 / 0.618 of the owner leg)
+   cl_mig50  = (IsNa(ownOrig)||IsNa(ownExt)) ? PINE_NA : ownExt + 0.5  *(ownOrig-ownExt);
+   cl_mig618 = (IsNa(ownOrig)||IsNa(ownExt)) ? PINE_NA : ownExt + 0.618*(ownOrig-ownExt);
+
+   //--- NARRATIVE LINEAGE - successive pullback depths
+   if(ownDir!=g_narrDir)
+     {
+      g_narrDir=ownDir;
+      g_legX = ownDir==1?hi:ownDir==-1?lo:PINE_NA;
+      g_legPBdepth=0.0; cl_narrative=50.0; g_supVotes=0; g_degVotes=0;
+      ArrayResize(g_seqRetr,0); ArrayResize(g_lifeSeq,0);
+     }
+   if(ownDir!=0 && !IsNa(ownOrig))
+     {
+      bool newLegX = ownDir==1 ? hi>Nz(g_legX,hi) : lo<Nz(g_legX,lo);
+      if(newLegX)
+        {
+         if(g_legPBdepth>6.0)
+           {
+            bool sup = g_legPBdepth<=50.0 && cmpTighten>=-1.0;
+            bool deg = g_legPBdepth>=62.0 || cmpTighten<-3.0;
+            int  vote = sup?1:deg?-1:0;
+            g_supVotes += (vote==1?1:0);
+            g_degVotes += (vote==-1?1:0);
+            cl_narrative = Clamp(cl_narrative + vote*12.0 + (cmpTighten>0.0?3.0:-3.0), 0.0, 100.0);
+            CL_PushCap(g_seqRetr, g_legPBdepth, 5);
+            CL_PushCap(g_lifeSeq, cl_life, 5);
+           }
+         g_legX = ownDir==1?hi:lo;
+         g_legPBdepth=0.0;
+        }
+      else
+        {
+         double pbd = MathAbs(Nz(g_legX,cl)-ownOrig)>1e-9 ? MathAbs(Nz(g_legX,cl)-cl)/MathAbs(Nz(g_legX,cl)-ownOrig)*100.0 : 0.0;
+         g_legPBdepth = MathMax(g_legPBdepth, pbd);
+        }
+     }
+   cl_narrState = cl_narrative>=65.0 ? "STRENGTHENING" : cl_narrative<=35.0 ? "WEAKENING" : "HOLDING";
+
+   //--- CHAIN VITALITY (is life decaying across successive curves?)
+   cl_wholeChainLife = cl_wholeChainLife + 0.02*(cl_life-cl_wholeChainLife);
+   int ls=ArraySize(g_lifeSeq);
+   cl_chainVitality = ls>=2 ? Clamp(50.0+(g_lifeSeq[ls-1]-g_lifeSeq[0]), 0.0, 100.0) : cl_wholeChainLife;
+   cl_chainScope = cl_life>=50.0 ? "healthy" :
+                   cl_chainVitality>=50.0 ? "CURVE only - chain intact" :
+                   cl_wholeChainLife>=45.0 ? "CHAIN weakening" : "WHOLE CHAIN decaying";
   }
 //+------------------------------------------------------------------+
 
@@ -2900,6 +3274,9 @@ void Trade_OnSignals()
       if(nd==-1 && sig_longSignal) Trade_CloseAll("flip to long");
      }
 
+   //--- F72 curve-life management (DEAD exits / WEAKENING breakeven)
+   Trade_ManageCurveLife();
+
    if(tm_halted) return;                 // risk circuit breaker
    if(!Trade_SessionOK()) return;
    if(!Trade_SpreadOK())  return;
@@ -2954,6 +3331,58 @@ void Trade_OnSignals()
          PrintFormat("Letra37 SELL failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       else
          PrintFormat("Letra37 SELL %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",lots,sl,tp,sig_grade,sig_finalProb);
+     }
+  }
+
+//==================================================================
+//  F72 curve-life management of OPEN trades (per closed work bar).
+//  Manage-only: never opens or gates entries.
+//    DEAD (owning curve died) -> abandon a with-owner position
+//    WEAKENING                -> move SL to breakeven if in profit
+//==================================================================
+void Trade_ManageCurveLife()
+  {
+   if(!InpEnableTrading || !InpUseCurveLife) return;
+   int nd=Trade_NetDir();
+   if(nd==0) return;
+
+   //--- owning curve is DEAD and we hold a position aligned with it -> exit
+   if(InpCurveLifeFlatOnDead && cl_state=="DEAD" && nd==cl_ownDir)
+     {
+      Trade_CloseAll("curve-life DEAD");
+      return;
+     }
+
+   //--- WEAKENING -> lock breakeven on any position that is in profit
+   if(InpCurveLifeTightenWeak && cl_state=="WEAKENING")
+     {
+      double point=tm_point;
+      double minStop=(double)tm_stopLevel*point;
+      for(int i=PositionsTotal()-1;i>=0;i--)
+        {
+         ulong tk=PositionGetTicket(i);
+         if(tk==0) continue;
+         if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+         int    ptype=(int)PositionGetInteger(POSITION_TYPE);
+         double open =PositionGetDouble(POSITION_PRICE_OPEN);
+         double curSL=PositionGetDouble(POSITION_SL);
+         double curTP=PositionGetDouble(POSITION_TP);
+         double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         if(ptype==POSITION_TYPE_BUY)
+           {
+            double be=open+point*2;
+            if(bid-open>0 && (curSL<be) && (bid-be)>=minStop)
+               g_trade.PositionModify(tk, NormalizeDouble(be,tm_digits), curTP);
+           }
+         else if(ptype==POSITION_TYPE_SELL)
+           {
+            double be=open-point*2;
+            if(open-ask>0 && (curSL>be || curSL==0.0) && (be-ask)>=minStop)
+               g_trade.PositionModify(tk, NormalizeDouble(be,tm_digits), curTP);
+           }
+        }
      }
   }
 
@@ -3060,6 +3489,10 @@ void Dash_Update()
    s += "Liquidity : Heat "+DoubleToString(liqHeat,0)+"  "+liqZone+"   sweepOK "+(liqSweepOK?"Y":"N") + nl;
    s += "ERF       : "+re_resolutionState+"  ready "+DoubleToString(erf_tradeReadiness,0)+"%  gate "+(erf_entryGate?"OPEN":"SHUT") + nl;
    s += "FlipStages: " + IntegerToString(flipzoneStagesComplete)+"/5   obFresh "+(obFresh?"Y":"N") + nl;
+   s += "CurveLife : " + cl_aliveTx + "  (life "+DoubleToString(cl_life,0)+")" + nl;
+   s += "  force   : " + cl_cpState+" "+cl_cpTrend+"   narr "+cl_narrState+"   chain "+cl_chainScope + nl;
+   s += "  HTF     : " + cl_htfThreat+(IsNa(cl_htfRoomAtr)?"":"  "+DoubleToString(cl_htfRoomAtr,1)+" ATR") + nl;
+   s += "TimeIntel : dir "+DirWord(timeDir)+"  align "+DoubleToString(timeAlign,0)+"%   H1 "+h1Timing+" ("+tH1State+")" + nl;
    s += "TradeState: " + (tradeDir==1?"LONG":tradeDir==-1?"SHORT":"FLAT") + "   positions "+IntegerToString(Trade_CountPositions()) + nl;
    s += "Vol regime: " + phys_volRegime + "  ATR "+DoubleToString(IsNa(atr)?0.0:atr,_Digits);
 
@@ -3125,6 +3558,8 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    GeoWave_Compute();   // Sec 11-12
    WaveSpawn_Compute(); // Sec 13-14
    Signals_Compute();   // Sec 15-24
+   TimeIntel_Compute(); // Time Intelligence Engine (context)
+   CurveLife_Compute(); // F72 curve-life (open-trade management)
   }
 
 //==================================================================
@@ -3190,6 +3625,8 @@ int OnInit()
    WaveSpawn_Init();
    Erf_Init();
    Signals_Init();
+   TimeIntel_Init();
+   CurveLife_Init();
    Trade_Init();
 
    //--- warm up the engines on history so live decisions are valid
