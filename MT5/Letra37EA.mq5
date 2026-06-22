@@ -27,6 +27,7 @@
 #include "Include/Letra37/PineRuntime.mqh"
 #include "Include/Letra37/Inputs.mqh"
 #include "Include/Letra37/Context.mqh"
+#include "Include/Letra37/SharedState.mqh"
 
 //--- Engine modules (added part by part)
 #include "Include/Letra37/PhysicsEngine.mqh"
@@ -49,6 +50,7 @@ int OnInit()
   {
    //--- bind config from inputs into the shared context
    Ctx_LoadInputs();
+   SharedState_Init();
 
    //--- configure trade object
    g_trade.SetExpertMagicNumber(InpMagic);
