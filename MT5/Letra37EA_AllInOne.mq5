@@ -2,18 +2,19 @@
 //|                                          Letra37EA_AllInOne.mq5  |
 //|   Autonomous Expert Advisor - faithful single-file MQL5 port of  |
 //|   the "Letra 37" Pine Script v6 engine + the full F72 recursive  |
-//|   curve framework: 14-phase structure engine, adaptive TF        |
-//|   ladder, Time Intelligence Engine, recursive curve TREE         |
-//|   (per-node ownership/FU-merge), multi-timeframe curve OWNERSHIP  |
-//|   map (transfer ladder / Wyckoff four-shift / entry architecture),|
-//|   curve ownership (building-vs-entry, budget) and the curve-life |
-//|   "is the trade alive?" manager.                                 |
+//|   curve framework that ANALYSES, TRACKS and (optionally)         |
+//|   EXECUTES: 14-phase structure engine, adaptive TF ladder, Time  |
+//|   Intelligence Engine, recursive curve TREE (per-node ownership/ |
+//|   FU-merge), multi-timeframe curve OWNERSHIP map (transfer ladder|
+//|   / Wyckoff four-shift / entry architecture), curve ownership    |
+//|   (building-vs-entry, budget), curve-life manager, and the F72   |
+//|   entry-cycle EXECUTION path.                                    |
 //|   Keeps the Letra decision layer; excludes the Senseei layer.    |
 //|                                                                  |
 //|   COMBINED build: every module inlined in dependency order.      |
 //+------------------------------------------------------------------+
 #property copyright "Letra 37 Port"
-#property version   "1.40"
+#property version   "1.50"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -355,6 +356,12 @@ input group "Curve-Life Management (F72)"
 input bool   InpUseCurveLife       = true;  // Use F72 curve-life to manage open trades
 input bool   InpCurveLifeFlatOnDead= true;  // Close position when owning curve is DEAD
 input bool   InpCurveLifeTightenWeak=true;  // Move SL to breakeven when WEAKENING
+
+//==================== ENTRY-CYCLE EXECUTION (F72) ================
+input group "Entry-Cycle Execution (F72)"
+input bool   InpUseEntryCycleExec = false; // Execute on recursive entry-cycle (additive to Letra)
+input int    InpEcMinWyckoff      = 2;     // Min Wyckoff shifts to confirm entry cycle (1-4)
+input bool   InpEcRequireTransfer = true;  // Require dominance transfer (transferring/complete)
 
 //==================== SESSION FILTER ==============================
 input group "Session Filter"
@@ -3596,6 +3603,70 @@ void CurveLife_Compute()
 //+------------------------------------------------------------------+
 
 // =================================================================
+// ==== INLINED: Include/Letra37/EntryCycleExec.mqh
+// =================================================================
+//+------------------------------------------------------------------+
+//|  EntryCycleExec.mqh - F72 entry-cycle EXECUTION signal           |
+//|                                                                  |
+//|  Makes the recursive-curve framework executable: the spec says   |
+//|  the decisive event is not a phase label but the moment the      |
+//|  ENTRY CYCLE becomes active at the HTF terminal (flip/supply/     |
+//|  demand) zone - "once the entry cycle starts, hesitation gets    |
+//|  you left behind." This engine fires ONE signal per entry-cycle  |
+//|  activation, trading WITH the curve that has won ownership of     |
+//|  the terminal zone (the new campaign / reversal), once:          |
+//|    * campaign is TERMINAL (price at the HTF flip zone), and       |
+//|    * entry readiness is ENTRY ACTIVE or TERMINAL, and             |
+//|    * the recursive entry cycle has matured (Wyckoff shifts >=     |
+//|      InpEcMinWyckoff - distinguishing the entry cycle from the    |
+//|      first strike), and                                          |
+//|    * dominance has transferred (transferring/complete) if         |
+//|      required.                                                   |
+//|                                                                  |
+//|  This is ADDITIVE to the precise Letra trigger (both can fire)   |
+//|  and is OFF by default. It adds no conflict safety / gating to    |
+//|  the Letra entries.                                              |
+//+------------------------------------------------------------------+
+
+//================= EC EXECUTION OUTPUTS ===========================
+bool   sigEC_long=false;
+bool   sigEC_short=false;
+int    ec_dir=0;
+bool   ec_active=false;
+bool   ec_ready=false;
+
+//--- one-shot latch per entry-cycle activation
+bool   g_ec_fired=false;
+
+void EntryCycleExec_Init(){ g_ec_fired=false; sigEC_long=false; sigEC_short=false; }
+
+void EntryCycleExec_Compute()
+  {
+   sigEC_long=false; sigEC_short=false;
+
+   ec_active = (co_campaign=="TERMINAL") &&
+               (co_entryReadiness=="ENTRY ACTIVE" || co_entryReadiness=="TERMINAL");
+
+   //--- trade WITH the curve that owns the terminal zone (the new campaign).
+   //    Prefer the curve-tree owner; fall back to the MTF owner direction.
+   ec_dir = ec_active ? (ct_ownDir!=0 ? ct_ownDir : mo_dir) : 0;
+
+   bool wyckOK = mo_wyckoffShifts >= InpEcMinWyckoff;
+   bool xferOK = (!InpEcRequireTransfer) ||
+                 (mo_transferState=="TRANSFERRING" || mo_transferState=="COMPLETE" || ct_transferred);
+   ec_ready = ec_active && ec_dir!=0 && wyckOK && xferOK;
+
+   //--- reset the latch when we leave the terminal/entry-cycle environment
+   if(!ec_active) g_ec_fired=false;
+
+   bool fireOK = ec_ready && !g_ec_fired;
+   sigEC_long  = fireOK && ec_dir==1;
+   sigEC_short = fireOK && ec_dir==-1;
+   if(fireOK) g_ec_fired=true;
+  }
+//+------------------------------------------------------------------+
+
+// =================================================================
 // ==== INLINED: Include/Letra37/TradeManager.mqh
 // =================================================================
 //+------------------------------------------------------------------+
@@ -3788,6 +3859,14 @@ void Trade_OnSignals()
 
    bool wantLong  = sig_longSignal;
    bool wantShort = sig_shortSignal;
+   string tag = "letra";
+
+   //--- ADDITIVE entry-cycle execution path (F72) - never gates Letra
+   if(InpUseEntryCycleExec)
+     {
+      if(sigEC_long  && !wantLong ){ wantLong =true; tag="entry-cycle"; }
+      if(sigEC_short && !wantShort){ wantShort=true; tag="entry-cycle"; }
+     }
    if(!wantLong && !wantShort) return;
 
    //--- respect position cap & avoid stacking same dir
@@ -3796,46 +3875,48 @@ void Trade_OnSignals()
    if(wantLong  && nd==1)  return;       // already long
    if(wantShort && nd==-1) return;       // already short
 
+   if(wantLong)       Trade_Open(1,  tag);
+   else if(wantShort) Trade_Open(-1, tag);
+  }
+
+//==================================================================
+//  Open a position in `dir` (+1 long / -1 short) with risk-% sizing
+//  and structural/ATR stop + ATR take-profit. Shared by the Letra
+//  trigger and the entry-cycle execution path.
+//==================================================================
+void Trade_Open(const int dir,const string tag)
+  {
    double atrv = IsNa(atr) ? 0.0 : atr;
    if(atrv<=0) return;
-
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double minStop = (double)tm_stopLevel*tm_point;
 
-   if(wantLong)
+   if(dir==1)
      {
-      double entry = ask;
-      double sl;
-      if(InpUseStructSL && !IsNa(flipBot))
-         sl = MathMin(flipBot, !IsNa(l0_inv)?l0_inv:flipBot) - atrv*0.25;
-      else
-         sl = entry - atrv*InpSL_ATR;
+      double entry=ask;
+      double sl = (InpUseStructSL && !IsNa(flipBot)) ? MathMin(flipBot,!IsNa(l0_inv)?l0_inv:flipBot)-atrv*0.25 : entry-atrv*InpSL_ATR;
       if(entry-sl < minStop) sl = entry-minStop-tm_point;
-      double tp = (InpTP_ATR>0.0) ? entry + atrv*InpTP_ATR : 0.0;
+      double tp = (InpTP_ATR>0.0) ? entry+atrv*InpTP_ATR : 0.0;
       double lots = Trade_LotsForRisk(entry-sl);
       sl=NormalizeDouble(sl,tm_digits); if(tp>0) tp=NormalizeDouble(tp,tm_digits);
-      if(!g_trade.Buy(lots,_Symbol,0.0,sl,tp,InpTradeComment))
+      if(!g_trade.Buy(lots,_Symbol,0.0,sl,tp,InpTradeComment+" "+tag))
          PrintFormat("Letra37 BUY failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       else
-         PrintFormat("Letra37 BUY %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",lots,sl,tp,sig_grade,sig_finalProb);
+         PrintFormat("Letra37 BUY [%s] %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",tag,lots,sl,tp,sig_grade,sig_finalProb);
      }
-   else if(wantShort)
+   else if(dir==-1)
      {
-      double entry = bid;
-      double sl;
-      if(InpUseStructSL && !IsNa(flipTop))
-         sl = MathMax(flipTop, !IsNa(l0_inv)?l0_inv:flipTop) + atrv*0.25;
-      else
-         sl = entry + atrv*InpSL_ATR;
+      double entry=bid;
+      double sl = (InpUseStructSL && !IsNa(flipTop)) ? MathMax(flipTop,!IsNa(l0_inv)?l0_inv:flipTop)+atrv*0.25 : entry+atrv*InpSL_ATR;
       if(sl-entry < minStop) sl = entry+minStop+tm_point;
-      double tp = (InpTP_ATR>0.0) ? entry - atrv*InpTP_ATR : 0.0;
+      double tp = (InpTP_ATR>0.0) ? entry-atrv*InpTP_ATR : 0.0;
       double lots = Trade_LotsForRisk(sl-entry);
       sl=NormalizeDouble(sl,tm_digits); if(tp>0) tp=NormalizeDouble(tp,tm_digits);
-      if(!g_trade.Sell(lots,_Symbol,0.0,sl,tp,InpTradeComment))
+      if(!g_trade.Sell(lots,_Symbol,0.0,sl,tp,InpTradeComment+" "+tag))
          PrintFormat("Letra37 SELL failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       else
-         PrintFormat("Letra37 SELL %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",lots,sl,tp,sig_grade,sig_finalProb);
+         PrintFormat("Letra37 SELL [%s] %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",tag,lots,sl,tp,sig_grade,sig_finalProb);
      }
   }
 
@@ -4005,6 +4086,7 @@ void Dash_Update()
    s += "  nodes   : "+IntegerToString(ct_treeAlive)+" alive  depth "+IntegerToString(ct_treeDepth)+"/"+IntegerToString(ct_budgetDepth)+"   "+ct_ownStateTx + nl;
    s += "MTF own   : "+mo_ownerLabel+" "+DoubleToString(mo_ownerPct,0)+"% / "+mo_secondLabel+" "+DoubleToString(mo_secondPct,0)+"%  "+DirWord(mo_dir)+"  ["+mo_transferState+"]" + nl;
    s += "  arch    : "+mo_entryArch+"  ~"+IntegerToString(mo_expectedEntries)+" entries   Wyckoff "+IntegerToString(mo_wyckoffShifts)+"/4" + nl;
+   s += "EntryExec : "+(InpUseEntryCycleExec?"ON":"off")+"  "+(ec_active?"ACTIVE":"-")+(ec_ready?" READY "+DirWord(ec_dir):"")+(sigEC_long?"  >> EC LONG":sigEC_short?"  >> EC SHORT":"") + nl;
    s += "TimeIntel : dir "+DirWord(timeDir)+"  align "+DoubleToString(timeAlign,0)+"%   H1 "+h1Timing+" ("+tH1State+")" + nl;
    s += "TradeState: " + (tradeDir==1?"LONG":tradeDir==-1?"SHORT":"FLAT") + "   positions "+IntegerToString(Trade_CountPositions()) + nl;
    s += "Vol regime: " + phys_volRegime + "  ATR "+DoubleToString(IsNa(atr)?0.0:atr,_Digits);
@@ -4076,6 +4158,7 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    CurveOwnership_Compute(); // F72 recursive curve ownership (budget/building-vs-entry)
    MtfOwnership_Compute();   // cross-TF curve-ownership map + transfer-state ladder
    CurveLife_Compute(); // F72 curve-life (open-trade management)
+   EntryCycleExec_Compute(); // F72 entry-cycle execution signal
   }
 
 //==================================================================
@@ -4146,6 +4229,7 @@ int OnInit()
    CurveOwnership_Init();
    MtfOwnership_Init();
    CurveLife_Init();
+   EntryCycleExec_Init();
    Trade_Init();
 
    //--- warm up the engines on history so live decisions are valid
