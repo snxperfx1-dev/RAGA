@@ -99,6 +99,12 @@ input long   InpMagic           = 370037;      // Magic number
 input int    InpSlippagePoints  = 20;          // Max deviation (points)
 input string InpTradeComment    = "Letra37";   // Order comment
 
+//==================== CURVE-LIFE MANAGEMENT (F72) ================
+input group "Curve-Life Management (F72)"
+input bool   InpUseCurveLife       = true;  // Use F72 curve-life to manage open trades
+input bool   InpCurveLifeFlatOnDead= true;  // Close position when owning curve is DEAD
+input bool   InpCurveLifeTightenWeak=true;  // Move SL to breakeven when WEAKENING
+
 //==================== SESSION FILTER ==============================
 input group "Session Filter"
 input bool   InpUseSession      = false;       // Restrict trading to a session

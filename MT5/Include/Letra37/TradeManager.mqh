@@ -180,6 +180,9 @@ void Trade_OnSignals()
       if(nd==-1 && sig_longSignal) Trade_CloseAll("flip to long");
      }
 
+   //--- F72 curve-life management (DEAD exits / WEAKENING breakeven)
+   Trade_ManageCurveLife();
+
    if(tm_halted) return;                 // risk circuit breaker
    if(!Trade_SessionOK()) return;
    if(!Trade_SpreadOK())  return;
@@ -234,6 +237,58 @@ void Trade_OnSignals()
          PrintFormat("Letra37 SELL failed: %d %s",g_trade.ResultRetcode(),g_trade.ResultRetcodeDescription());
       else
          PrintFormat("Letra37 SELL %.2f lots sl=%.5f tp=%.5f grade=%s prob=%.0f",lots,sl,tp,sig_grade,sig_finalProb);
+     }
+  }
+
+//==================================================================
+//  F72 curve-life management of OPEN trades (per closed work bar).
+//  Manage-only: never opens or gates entries.
+//    DEAD (owning curve died) -> abandon a with-owner position
+//    WEAKENING                -> move SL to breakeven if in profit
+//==================================================================
+void Trade_ManageCurveLife()
+  {
+   if(!InpEnableTrading || !InpUseCurveLife) return;
+   int nd=Trade_NetDir();
+   if(nd==0) return;
+
+   //--- owning curve is DEAD and we hold a position aligned with it -> exit
+   if(InpCurveLifeFlatOnDead && cl_state=="DEAD" && nd==cl_ownDir)
+     {
+      Trade_CloseAll("curve-life DEAD");
+      return;
+     }
+
+   //--- WEAKENING -> lock breakeven on any position that is in profit
+   if(InpCurveLifeTightenWeak && cl_state=="WEAKENING")
+     {
+      double point=tm_point;
+      double minStop=(double)tm_stopLevel*point;
+      for(int i=PositionsTotal()-1;i>=0;i--)
+        {
+         ulong tk=PositionGetTicket(i);
+         if(tk==0) continue;
+         if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+         int    ptype=(int)PositionGetInteger(POSITION_TYPE);
+         double open =PositionGetDouble(POSITION_PRICE_OPEN);
+         double curSL=PositionGetDouble(POSITION_SL);
+         double curTP=PositionGetDouble(POSITION_TP);
+         double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+         if(ptype==POSITION_TYPE_BUY)
+           {
+            double be=open+point*2;
+            if(bid-open>0 && (curSL<be) && (bid-be)>=minStop)
+               g_trade.PositionModify(tk, NormalizeDouble(be,tm_digits), curTP);
+           }
+         else if(ptype==POSITION_TYPE_SELL)
+           {
+            double be=open-point*2;
+            if(open-ask>0 && (curSL>be || curSL==0.0) && (be-ask)>=minStop)
+               g_trade.PositionModify(tk, NormalizeDouble(be,tm_digits), curTP);
+           }
+        }
      }
   }
 

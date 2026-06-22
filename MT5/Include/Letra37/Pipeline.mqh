@@ -54,6 +54,8 @@ void Ctx_StepWorkBar(const datetime workOpenTime)
    GeoWave_Compute();   // Sec 11-12
    WaveSpawn_Compute(); // Sec 13-14
    Signals_Compute();   // Sec 15-24
+   TimeIntel_Compute(); // Time Intelligence Engine (context)
+   CurveLife_Compute(); // F72 curve-life (open-trade management)
   }
 
 //==================================================================

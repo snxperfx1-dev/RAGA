@@ -38,7 +38,9 @@
 #include "Include/Letra37/GeometryWave.mqh"
 #include "Include/Letra37/WaveSpawn.mqh"
 #include "Include/Letra37/Erf.mqh"
+#include "Include/Letra37/TimeIntel.mqh"
 #include "Include/Letra37/ScoringSignals.mqh"
+#include "Include/Letra37/CurveLife.mqh"
 #include "Include/Letra37/TradeManager.mqh"
 #include "Include/Letra37/Dashboard.mqh"
 #include "Include/Letra37/Pipeline.mqh"   // orchestration (must be last)
@@ -67,6 +69,8 @@ int OnInit()
    WaveSpawn_Init();
    Erf_Init();
    Signals_Init();
+   TimeIntel_Init();
+   CurveLife_Init();
    Trade_Init();
 
    //--- warm up the engines on history so live decisions are valid
